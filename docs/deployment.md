@@ -35,6 +35,21 @@ Docker Desktop（WSL2 后端）的端口发布**默认只在 localhost 可达**�
 验证方式：**用局域网内另一台设备**（手机浏览器开 `http://<主机IP>:8000/health`）。
 注意：主机自己访问自己的 LAN IP 不通是 mirrored 模式的 hairpin 现象，属正常，**不是**故障；`netsh interface portproxy` 方案在此模式下无效，勿用。
 
+## 外网访问（Tailscale 组网）
+
+宽带无公网 IP（CGNAT），不暴露任何公网端口，用 Tailscale 把查看设备组进虚拟网：
+
+1. 服务端主机装 Tailscale（`winget install Tailscale.Tailscale`），`tailscale up` 登录
+2. 手机/笔记本装 Tailscale App，**同一账号**登录并连接
+3. 外网访问 `http://<服务端 Tailscale IP>:8000/...` 即可；Tailscale IP 查 `tailscale status` 或管理后台
+
+说明：
+
+- 传输由 WireGuard 端到端加密，MQTT/Web 均不暴露公网，板子零改动
+- mirrored 网络下 Docker 发布端口对 Tailscale 接口同样可达，无需额外防火墙规则
+- 主机自访自己的 Tailscale IP 不通也是 hairpin 现象，用另一台设备验证
+- 局限：每个查看设备都要装客户端；如需免客户端分享给他人，再评估 Cloudflare Tunnel
+
 ## contact-node 固件
 
 - 首次/重配：开机后 1.5s 内按住 FLASH 键 ≥300ms → 清空配置 → 热点 `contact-node-setup` → `192.168.4.1` 配网（WiFi + MQTT 四项）
