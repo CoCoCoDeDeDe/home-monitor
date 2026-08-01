@@ -1,4 +1,4 @@
-"""MQTT 消费：订阅 contact/+/{state,status,health} 与 syncreq，事件回调。"""
+"""MQTT 消费：订阅 <type>/<id>/{state,status,health}（物模型通用）与 contact/syncreq，事件回调。"""
 
 import json
 
@@ -7,7 +7,10 @@ import paho.mqtt.client as mqtt
 
 def start_mqtt(host: str, port: int, user: str, password: str,
                on_state, on_status, on_health) -> mqtt.Client:
-    """on_state(node, state, cached)；on_status(node, status)；on_health(node, rssi, uptime)"""
+    """回调均带物模型类型前缀：
+    on_state(ntype, node, state, cached, retained)；on_status(ntype, node, status, retained)；
+    on_health(ntype, node, rssi, uptime)。node 为 topic 中的 id（不带前缀）。
+    retained=True 表示 broker retain 重放（本端重连时的旧消息），不应记为新事件。"""
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if user:
         client.username_pw_set(user, password)
@@ -16,8 +19,9 @@ def start_mqtt(host: str, port: int, user: str, password: str,
 
     def on_connect(c, _u, _f, rc, _p=None):
         print(f"[mqtt] connected rc={rc}", flush=True)
-        c.subscribe([("contact/+/state", 0), ("contact/+/status", 0),
-                     ("contact/+/health", 0), ("contact/syncreq", 0)])
+        # 物模型通用化：type 段用通配符，任何新节点类型自动被消费
+        c.subscribe([("+/+/state", 0), ("+/+/status", 0),
+                     ("+/+/health", 0), ("contact/syncreq", 0)])
         # 广播就绪：有缓存事件的节点收到后才补发（避免本端未订阅时补发被丢）
         c.publish("contact/sync", "1")
 
@@ -26,14 +30,14 @@ def start_mqtt(host: str, port: int, user: str, password: str,
             print(f"[mqtt] syncreq from {msg.payload.decode(errors='replace')}", flush=True)
             c.publish("contact/sync", "1")
             return
-        parts = msg.topic.split("/")  # contact/<node>/<kind>
+        parts = msg.topic.split("/")  # <type>/<node>/<kind>
         if len(parts) != 3:
             return
-        node, kind = parts[1], parts[2]
+        ntype, node, kind = parts
         if kind == "status":
             status = msg.payload.decode(errors="replace")
             print(f"[mqtt] {msg.topic} {status}", flush=True)
-            on_status(node, status)
+            on_status(ntype, node, status, bool(msg.retain))
             return
         try:
             data = json.loads(msg.payload)
@@ -41,13 +45,13 @@ def start_mqtt(host: str, port: int, user: str, password: str,
             print(f"[mqtt] 非法 payload: {msg.topic}", flush=True)
             return
         if kind == "health":
-            on_health(data.get("node") or node,
-                      data.get("rssi"), data.get("uptime"))
+            on_health(ntype, node, data.get("rssi"), data.get("uptime"))
             return
         print(f"[mqtt] {msg.topic} {data}", flush=True)
-        on_state(data.get("node") or node,
+        on_state(ntype, node,
                  data.get("state", ""),
-                 bool(data.get("cached")))
+                 bool(data.get("cached")),
+                 bool(msg.retain))
 
     client.on_connect = on_connect
     client.on_message = on_message

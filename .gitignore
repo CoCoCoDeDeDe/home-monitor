@@ -11,6 +11,8 @@ venv/
 .env
 secrets.h
 server/mosquitto/password
+# SQLite 事件库（本地持久化数据）
+server/data/
 *.local.yml
 docker-compose.override.yml
 
