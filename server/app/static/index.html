@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>home-monitor 看板</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f1420; color: #dde3ee;
+         max-width: 720px; margin: 0 auto; padding: 12px; }
+  h1 { font-size: 18px; padding: 8px 0; }
+  h2 { font-size: 14px; color: #8a93a8; padding: 16px 0 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .card { background: #1a2130; border-radius: 10px; padding: 12px; border: 1px solid #2a3348; }
+  .card .label { font-size: 12px; color: #8a93a8; }
+  .card .primary { font-size: 22px; font-weight: 600; margin: 6px 0; }
+  .card .meta { font-size: 12px; color: #aab3c8; line-height: 1.7; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 8px; margin-left: 6px; }
+  .ok    { color: #4ade80; } .badge.ok    { background: #14532d; color: #4ade80; }
+  .warn  { color: #fbbf24; } .badge.warn  { background: #553a0f; color: #fbbf24; }
+  .info  { color: #60a5fa; } .badge.info  { background: #1e3a5f; color: #60a5fa; }
+  .off   { color: #6b7280; } .badge.off   { background: #374151; color: #9ca3af; }
+  .evt { background: #1a2130; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
+         font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+  .evt .time { color: #8a93a8; font-size: 11px; white-space: nowrap; }
+  .evt .node { color: #aab3c8; font-size: 11px; }
+  pre { font-size: 11px; color: #aab3c8; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<h1>home-monitor 看板</h1>
+<h2>节点</h2>
+<div class="grid" id="nodes"></div>
+<h2>事件</h2>
+<div id="events"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function fmtDuration(s) {
+  if (s == null) return '-';
+  s = Math.floor(s);
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}天${h}时` : h ? `${h}时${m}分` : m ? `${m}分${s % 60}秒` : `${s}秒`;
+}
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+}
+
+// 档案驱动渲染：有档案按档案，无档案兜底通用卡片
+function nodeCard(node, id, profile) {
+  const online = node.status === 'online';
+  const badge = `<span class="badge ${online ? 'ok' : 'off'}">${online ? '在线' : '离线'}</span>`;
+  if (!profile) {  // 未知类型兜底：永远能显示
+    return `<div class="card"><div class="label">${esc(node.type || '?')} / ${esc(id)} ${badge}</div>
+      <div class="primary">未注册类型</div><pre>${esc(JSON.stringify(node, null, 1))}</pre></div>`;
+  }
+  const d = profile.dashboard || {};
+  let primary = '';
+  if (d.primary) {
+    const v = node[d.primary.field];
+    const m = (d.primary.map || {})[v] || { text: v ?? '-', level: 'info' };
+    primary = `<div class="primary ${m.level}">${esc(m.text)}</div>`;
+  }
+  let fields = '';
+  for (const [f, cfg] of Object.entries(d.fields || {})) {
+    let v = node[f];
+    if (v == null) continue;
+    if (cfg.format === 'duration') v = fmtDuration(v);
+    fields += `<div>${esc(cfg.label)}: ${esc(v)}${esc(cfg.unit || '')}</div>`;
+  }
+  return `<div class="card"><div class="label">${esc(profile.label || profile.type)} / ${esc(id)} ${badge}</div>
+    ${primary}<div class="meta">${fields}</div></div>`;
+}
+
+function eventText(e, profile) {
+  const d = profile && profile.dashboard;
+  const st = e.payload && e.payload.state;
+  if (e.kind === 'state' && d && d.events && d.events[st]) {
+    const m = d.events[st];
+    return `<span class="${m.level}">${esc(m.text)}</span>` +
+      (e.payload.cached ? ' <span class="badge info">补发</span>' : '');
+  }
+  if (e.kind === 'status') {
+    return e.payload.status === 'online'
+      ? '<span class="ok">节点上线</span>' : '<span class="off">节点离线</span>';
+  }
+  return `<span class="info">${esc(e.kind)}</span> <pre style="display:inline">${esc(JSON.stringify(e.payload))}</pre>`;
+}
+
+async function refresh() {
+  try {
+    const [profiles, nodes, events] = await Promise.all([
+      fetch('/api/profiles').then(r => r.json()),
+      fetch('/nodes').then(r => r.json()),
+      fetch('/api/events?limit=30').then(r => r.json()),
+    ]);
+    $('nodes').innerHTML = Object.entries(nodes)
+      .map(([id, n]) => nodeCard(n, id, profiles[n.type])).join('') || '<div class="card">无节点</div>';
+    $('events').innerHTML = events
+      .map(e => `<div class="evt"><span class="time">${fmtTime(e.ts)}</span><span class="node">${esc(e.node)}</span>${eventText(e, profiles[e.type])}</div>`)
+      .join('') || '<div class="evt">无事件</div>';
+  } catch (err) {
+    console.error(err);
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

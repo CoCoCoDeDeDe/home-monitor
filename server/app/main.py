@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from alerter import Alerter
 from discovery import discovery_messages
@@ -99,6 +100,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="home-monitor", lifespan=lifespan)
+
+_STATIC = os.path.join(os.path.dirname(__file__), "static")
+
+
+@app.get("/")
+def dashboard():
+    """监控看板：物模型档案驱动的单页（无框架，5s 轮询 /nodes + /api/events）。"""
+    return FileResponse(os.path.join(_STATIC, "index.html"))
 
 
 @app.get("/health")
