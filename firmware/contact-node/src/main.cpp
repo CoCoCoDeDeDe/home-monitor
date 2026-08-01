@@ -15,6 +15,9 @@
 //   订阅，先发 contact/syncreq，等 app 广播 contact/sync 后再补发（标记 cached）
 // 注：PubSubClient 发布仅支持 QoS 0，QoS 1 由 LWT(willQoS=1) 和缓存补发兜住。
 //
+// 健康上报（Issue #10）：每 60s 发布 contact/<id>/health {"rssi","uptime"}（非 retain），
+// 供摆位评估与存活监控；断线则停更，配合 LWT 区分弱信号与离线。
+//
 // 其他：WiFiManager 自定义参数（MQTT 配置）不落盘，需自己存 LittleFS；
 // 开机后 1.5s 内按住 FLASH 键 ≥300ms 清空全部配置并重开配网门户。
 
@@ -29,6 +32,7 @@ static const size_t EVENTS_MAX_BYTES = 400;  // 缓存上限，约 10 条事件
 static const char* TOPIC_SYNC = "contact/sync";
 static const char* TOPIC_SYNCREQ = "contact/syncreq";
 static const unsigned long SYNCREQ_RETRY_MS = 30000;  // 没等到 sync 则重发请求
+static const unsigned long HEALTH_INTERVAL_MS = 60000;  // 健康上报周期
 
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -46,12 +50,14 @@ int resolveFailCount = 0;  // 主机名模式连续连接失败计数，触发�
 char nodeId[24];      // contact-<chipid>，每块板唯一
 char topicState[40];  // contact/<chipid>/state
 char topicStatus[40]; // contact/<chipid>/status
+char topicHealth[40]; // contact/<chipid>/health
 
 int lastStableState = -1;   // 去抖后的稳定状态：HIGH=关（闭合）/ LOW=开（断开）
 int lastRawReading = -1;
 unsigned long lastRawChangeMs = 0;
 unsigned long lastMqttRetryMs = 0;
 unsigned long lastSyncReqMs = 0;
+unsigned long lastHealthMs = 0;
 
 void loadMqttConfig() {
   File f = LittleFS.open(MQTT_CFG_PATH, "r");
@@ -129,6 +135,15 @@ void requestSync() {
   mqtt.publish(TOPIC_SYNCREQ, nodeId);
   lastSyncReqMs = millis();
   Serial.println("sync requested");
+}
+
+// 健康上报：rssi 用于摆位评估，uptime 用于存活监控（非 retain，只看实时）
+void publishHealth() {
+  char payload[110];
+  snprintf(payload, sizeof(payload), "{\"node\":\"%s\",\"rssi\":%d,\"uptime\":%lu}",
+           nodeId, WiFi.RSSI(), millis() / 1000);
+  mqtt.publish(topicHealth, payload);
+  Serial.printf("pub %s %s\n", topicHealth, payload);
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int len) {
@@ -296,6 +311,7 @@ void setup() {
   snprintf(nodeId, sizeof(nodeId), "contact-%06x", ESP.getChipId());
   snprintf(topicState, sizeof(topicState), "contact/%s/state", nodeId + 8);
   snprintf(topicStatus, sizeof(topicStatus), "contact/%s/status", nodeId + 8);
+  snprintf(topicHealth, sizeof(topicHealth), "contact/%s/health", nodeId + 8);
   Serial.printf("%s boot\n", nodeId);
 
   LittleFS.begin();
@@ -366,6 +382,11 @@ void loop() {
     }
   } else {
     mqtt.loop();
+    // 周期性健康上报
+    if (millis() - lastHealthMs > HEALTH_INTERVAL_MS) {
+      lastHealthMs = millis();
+      publishHealth();
+    }
     // 缓存事件未补发（sync 未到达/丢失）：周期性重发请求
     if (eventsPending() && millis() - lastSyncReqMs > SYNCREQ_RETRY_MS) {
       requestSync();

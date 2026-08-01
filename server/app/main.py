@@ -2,7 +2,7 @@
 
 功能规划见 docs/design.md。当前能力：
 - contact-node 开门事件 → 冷却防抖 → Server酱
-- 节点在线状态跟踪（LWT），GET /nodes 查看
+- 节点在线状态跟踪（LWT）+ 健康指标（rssi/uptime），GET /nodes 查看
 """
 
 import os
@@ -34,6 +34,14 @@ def _on_status(node: str, status: str) -> None:
     entry["ts"] = time.time()
 
 
+def _on_health(node: str, rssi, uptime) -> None:
+    node = node.removeprefix("contact-")
+    entry = nodes.setdefault(node, {})
+    entry["rssi"] = rssi
+    entry["uptime"] = uptime
+    entry["ts"] = time.time()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     alerter = Alerter(
@@ -47,6 +55,7 @@ async def lifespan(app: FastAPI):
         password=os.getenv("MQTT_PASS", ""),
         on_state=lambda n, s, c: _on_state(n, s, c, alerter),
         on_status=_on_status,
+        on_health=_on_health,
     )
     app.state.alerter = alerter
     app.state.mqtt = client
@@ -65,5 +74,5 @@ def health() -> dict:
 
 @app.get("/nodes")
 def list_nodes() -> dict:
-    """节点在线状态表（LWT 驱动）：status=online/offline，state=open/closed。"""
+    """节点状态表：status(LWT)=online/offline，state=open/closed，rssi/uptime=健康上报。"""
     return nodes
