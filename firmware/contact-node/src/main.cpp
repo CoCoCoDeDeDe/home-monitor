@@ -8,15 +8,26 @@
 // 开门（干簧管断开）→ 发布 contact/<chipid>/state {"state":"open"} → app 消费告警
 // 设计依据：docs/design.md
 //
-// 注意：WiFiManager 只自动持久化 WiFi 凭据，自定义参数（MQTT 配置）必须
-// 自己存 LittleFS，否则重启后回退默认值。开机后 1.5s 内按住 FLASH 键可
-// 清空全部配置并重新进入配网门户。
+// 可靠性设计（Issue #6）：
+// - LWT：异常掉线 broker 自动广播 contact/<id>/status = offline（retain）
+// - MQTT 断开期间的状态变化缓存到 LittleFS；重连后不立即补发——app 可能尚未
+//   订阅，先发 contact/syncreq，等 app 广播 contact/sync 后再补发（标记 cached）
+// 注：PubSubClient 发布仅支持 QoS 0，QoS 1 由 LWT(willQoS=1) 和缓存补发兜住。
+//
+// 其他：WiFiManager 自定义参数（MQTT 配置）不落盘，需自己存 LittleFS；
+// 开机后 1.5s 内按住 FLASH 键 ≥300ms 清空全部配置并重开配网门户。
 
 static const uint8_t PIN_REED = 5;   // NodeMCU D1 / GPIO5，干簧管接此脚与 GND 之间
 static const uint8_t PIN_FLASH = 0;  // NodeMCU FLASH 键 / GPIO0，按住为 LOW
 static const unsigned long DEBOUNCE_MS = 50;
 static const unsigned long MQTT_RETRY_MS = 5000;
 static const char* MQTT_CFG_PATH = "/mqtt.cfg";
+static const char* EVENTS_PATH = "/events.log";
+static const size_t EVENTS_MAX_BYTES = 400;  // 缓存上限，约 10 条事件
+// 补发握手：板子发 contact/syncreq，app 广播 contact/sync，板子收到才补发
+static const char* TOPIC_SYNC = "contact/sync";
+static const char* TOPIC_SYNCREQ = "contact/syncreq";
+static const unsigned long SYNCREQ_RETRY_MS = 30000;  // 没等到 sync 则重发请求
 
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -27,12 +38,15 @@ char mqttPort[6] = "1883";
 char mqttUser[24] = "";
 char mqttPass[24] = "";
 
-char nodeId[24];  // contact-<chipid>，每块板唯一
+char nodeId[24];      // contact-<chipid>，每块板唯一
+char topicState[40];  // contact/<chipid>/state
+char topicStatus[40]; // contact/<chipid>/status
 
 int lastStableState = -1;   // 去抖后的稳定状态：HIGH=关（闭合）/ LOW=开（断开）
 int lastRawReading = -1;
 unsigned long lastRawChangeMs = 0;
 unsigned long lastMqttRetryMs = 0;
+unsigned long lastSyncReqMs = 0;
 
 void loadMqttConfig() {
   File f = LittleFS.open(MQTT_CFG_PATH, "r");
@@ -57,21 +71,78 @@ void saveMqttConfig() {
   Serial.println("mqtt cfg saved");
 }
 
-void publishState(const char* state) {
-  char topic[40];
-  char payload[80];
-  snprintf(topic, sizeof(topic), "contact/%s/state", nodeId + 8);  // 去掉 "contact-" 前缀
-  snprintf(payload, sizeof(payload), "{\"node\":\"%s\",\"state\":\"%s\"}", nodeId, state);
-  mqtt.publish(topic, payload, true);  // retain：app 重启也能拿到最新状态
-  Serial.printf("pub %s %s\n", topic, payload);
+void publishState(const char* state, bool cached = false) {
+  char payload[100];
+  snprintf(payload, sizeof(payload), "{\"node\":\"%s\",\"state\":\"%s\"%s}",
+           nodeId, state, cached ? ",\"cached\":true" : "");
+  mqtt.publish(topicState, payload, true);  // retain：app 重启也能拿到最新状态
+  Serial.printf("pub %s %s\n", topicState, payload);
+}
+
+// 断线期间的事件写入 LittleFS 缓存
+void cacheEvent(const char* state) {
+  File f = LittleFS.open(EVENTS_PATH, "r");
+  size_t sz = f ? f.size() : 0;
+  if (f) f.close();
+  if (sz > EVENTS_MAX_BYTES) {
+    Serial.println("event cache full, drop");
+    return;
+  }
+  f = LittleFS.open(EVENTS_PATH, "a");
+  if (f) {
+    f.println(state);
+    f.close();
+    Serial.printf("cached event: %s\n", state);
+  }
+}
+
+// 重连成功后补发缓存事件并清空
+void flushEvents() {
+  File f = LittleFS.open(EVENTS_PATH, "r");
+  if (!f) return;
+  while (f.available()) {
+    String s = f.readStringUntil('\n');
+    s.trim();
+    if (s == "open" || s == "closed") {
+      publishState(s.c_str(), true);
+    }
+  }
+  f.close();
+  LittleFS.remove(EVENTS_PATH);
+  Serial.println("cached events flushed");
+}
+
+bool eventsPending() {
+  File f = LittleFS.open(EVENTS_PATH, "r");
+  if (!f) return false;
+  size_t sz = f.size();
+  f.close();
+  return sz > 0;
+}
+
+void requestSync() {
+  mqtt.publish(TOPIC_SYNCREQ, nodeId);
+  lastSyncReqMs = millis();
+  Serial.println("sync requested");
+}
+
+void onMqttMessage(char* topic, byte* payload, unsigned int len) {
+  // app 就绪广播：有缓存事件才补发
+  if (strcmp(topic, TOPIC_SYNC) == 0 && eventsPending()) {
+    flushEvents();
+  }
 }
 
 bool mqttConnect() {
-  // clientId 用 nodeId，重连时 broker 能识别同一设备
-  if (mqtt.connect(nodeId, mqttUser, mqttPass)) {
+  // clientId 用 nodeId；LWT：异常掉线时 broker 发布 status=offline（QoS1 retain）
+  if (mqtt.connect(nodeId, mqttUser, mqttPass, topicStatus, 1, true, "offline")) {
     Serial.println("mqtt connected");
+    mqtt.publish(topicStatus, "online", true);  // 上线标记
     // 上线即上报当前状态，保证 broker 里 retain 的是最新值
     publishState(digitalRead(PIN_REED) == HIGH ? "closed" : "open");
+    // 有缓存事件：订阅 app 就绪广播并请求同步，收到 contact/sync 才补发
+    mqtt.subscribe(TOPIC_SYNC);
+    if (eventsPending()) requestSync();
     return true;
   }
   Serial.printf("mqtt connect failed rc=%d (target %s:%s)\n", mqtt.state(), mqttHost, mqttPort);
@@ -83,6 +154,8 @@ void setup() {
   pinMode(PIN_REED, INPUT_PULLUP);
   pinMode(PIN_FLASH, INPUT_PULLUP);
   snprintf(nodeId, sizeof(nodeId), "contact-%06x", ESP.getChipId());
+  snprintf(topicState, sizeof(topicState), "contact/%s/state", nodeId + 8);
+  snprintf(topicStatus, sizeof(topicStatus), "contact/%s/status", nodeId + 8);
   Serial.printf("%s boot\n", nodeId);
 
   LittleFS.begin();
@@ -138,6 +211,7 @@ void setup() {
   strncpy(mqttPass, pPass.getValue(), sizeof(mqttPass) - 1);
 
   mqtt.setServer(mqttHost, atoi(mqttPort));
+  mqtt.setCallback(onMqttMessage);
   Serial.printf("wifi ok, mqtt -> %s:%s\n", mqttHost, mqttPort);
 }
 
@@ -150,6 +224,10 @@ void loop() {
     }
   } else {
     mqtt.loop();
+    // 缓存事件未补发（sync 未到达/丢失）：周期性重发请求
+    if (eventsPending() && millis() - lastSyncReqMs > SYNCREQ_RETRY_MS) {
+      requestSync();
+    }
   }
 
   // 干簧管去抖：电平稳定 DEBOUNCE_MS 后才认为状态变化
@@ -160,8 +238,11 @@ void loop() {
   }
   if (lastRawReading != lastStableState && millis() - lastRawChangeMs > DEBOUNCE_MS) {
     lastStableState = lastRawReading;
+    const char* state = lastStableState == HIGH ? "closed" : "open";
     if (mqtt.connected()) {
-      publishState(lastStableState == HIGH ? "closed" : "open");
+      publishState(state);
+    } else {
+      cacheEvent(state);  // 断线：缓存，重连后补发
     }
   }
 }
