@@ -3,6 +3,7 @@
 功能规划见 docs/design.md。当前能力：
 - contact-node 开门事件 → 冷却防抖 → Server酱
 - 节点在线状态跟踪（LWT）+ 健康指标（rssi/uptime），GET /nodes 查看
+- 事件落盘 SQLite（events.py），GET /api/events 查历史（重启不丢）
 """
 
 import os
@@ -12,31 +13,38 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from alerter import Alerter
+from events import EventStore
 from mqtt_client import start_mqtt
 
-# 节点状态表：{node: {"status": online/offline, "state": open/closed, "ts": 时间戳}}
+# 节点状态表：{node: {"type","status","state","rssi","uptime","ts"}}
 nodes: dict[str, dict] = {}
 
 
-def _on_state(node: str, state: str, cached: bool, alerter: Alerter) -> None:
-    node = node.removeprefix("contact-")  # payload 带前缀、topic 不带，统一键名
+def _on_state(ntype: str, node: str, state: str, cached: bool, retained: bool,
+              alerter: Alerter, store: EventStore) -> None:
     entry = nodes.setdefault(node, {})
+    entry["type"] = ntype
     entry["state"] = state
     entry["ts"] = time.time()
+    if retained:
+        return  # retain 重放只更新注册表，不记事件、不告警
+    store.record(ntype, node, "state", {"state": state, "cached": cached})
     if state == "open":
         alerter.alert_open(node)
 
 
-def _on_status(node: str, status: str) -> None:
-    node = node.removeprefix("contact-")
+def _on_status(ntype: str, node: str, status: str, retained: bool, store: EventStore) -> None:
     entry = nodes.setdefault(node, {})
+    entry["type"] = ntype
     entry["status"] = status
     entry["ts"] = time.time()
+    if not retained:
+        store.record(ntype, node, "status", {"status": status})
 
 
-def _on_health(node: str, rssi, uptime) -> None:
-    node = node.removeprefix("contact-")
+def _on_health(ntype: str, node: str, rssi, uptime) -> None:
     entry = nodes.setdefault(node, {})
+    entry["type"] = ntype
     entry["rssi"] = rssi
     entry["uptime"] = uptime
     entry["ts"] = time.time()
@@ -48,20 +56,23 @@ async def lifespan(app: FastAPI):
         sendkey=os.getenv("SCT_SENDKEY", ""),
         cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "60")),
     )
+    store = EventStore(os.getenv("EVENTS_DB", "/data/events.db"))
     client = start_mqtt(
         host=os.getenv("MQTT_HOST", "localhost"),
         port=int(os.getenv("MQTT_PORT", "1883")),
         user=os.getenv("MQTT_USER", ""),
         password=os.getenv("MQTT_PASS", ""),
-        on_state=lambda n, s, c: _on_state(n, s, c, alerter),
-        on_status=_on_status,
+        on_state=lambda t, n, s, c, r: _on_state(t, n, s, c, r, alerter, store),
+        on_status=lambda t, n, s, r: _on_status(t, n, s, r, store),
         on_health=_on_health,
     )
     app.state.alerter = alerter
     app.state.mqtt = client
+    app.state.events = store
     yield
     client.loop_stop()
     client.disconnect()
+    store.close()
 
 
 app = FastAPI(title="home-monitor", lifespan=lifespan)
@@ -74,5 +85,11 @@ def health() -> dict:
 
 @app.get("/nodes")
 def list_nodes() -> dict:
-    """节点状态表：status(LWT)=online/offline，state=open/closed，rssi/uptime=健康上报。"""
+    """节点状态表：type=物模型类型，status(LWT)=online/offline，state=open/closed，rssi/uptime=健康上报。"""
     return nodes
+
+
+@app.get("/api/events")
+def list_events(limit: int = 50, node: str | None = None) -> list[dict]:
+    """事件时间线（SQLite 落盘，重启不丢）：按时间倒序，可按节点过滤。"""
+    return app.state.events.query(limit=min(limit, 200), node=node)
