@@ -13,17 +13,30 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from alerter import Alerter
+from discovery import discovery_messages
 from events import EventStore
 from mqtt_client import start_mqtt
+from profiles import load_profiles
 
 # 节点状态表：{node: {"type","status","state","rssi","uptime","ts"}}
 nodes: dict[str, dict] = {}
+# 物模型类型档案（lifespan 启动时加载）
+PROFILES: dict[str, dict] = {}
+
+
+def _ensure_node(ntype: str, node: str, discover) -> dict:
+    """注册表建条目；新节点且类型有档案时触发 HA discovery 代发。"""
+    if node not in nodes:
+        entry = nodes.setdefault(node, {})
+        entry["type"] = ntype
+        discover(ntype, node)
+        return entry
+    return nodes[node]
 
 
 def _on_state(ntype: str, node: str, state: str, cached: bool, retained: bool,
-              alerter: Alerter, store: EventStore) -> None:
-    entry = nodes.setdefault(node, {})
-    entry["type"] = ntype
+              alerter: Alerter, store: EventStore, discover) -> None:
+    entry = _ensure_node(ntype, node, discover)
     entry["state"] = state
     entry["ts"] = time.time()
     if retained:
@@ -33,18 +46,17 @@ def _on_state(ntype: str, node: str, state: str, cached: bool, retained: bool,
         alerter.alert_open(node)
 
 
-def _on_status(ntype: str, node: str, status: str, retained: bool, store: EventStore) -> None:
-    entry = nodes.setdefault(node, {})
-    entry["type"] = ntype
+def _on_status(ntype: str, node: str, status: str, retained: bool,
+               store: EventStore, discover) -> None:
+    entry = _ensure_node(ntype, node, discover)
     entry["status"] = status
     entry["ts"] = time.time()
     if not retained:
         store.record(ntype, node, "status", {"status": status})
 
 
-def _on_health(ntype: str, node: str, rssi, uptime) -> None:
-    entry = nodes.setdefault(node, {})
-    entry["type"] = ntype
+def _on_health(ntype: str, node: str, rssi, uptime, discover) -> None:
+    entry = _ensure_node(ntype, node, discover)
     entry["rssi"] = rssi
     entry["uptime"] = uptime
     entry["ts"] = time.time()
@@ -57,14 +69,25 @@ async def lifespan(app: FastAPI):
         cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "60")),
     )
     store = EventStore(os.getenv("EVENTS_DB", "/data/events.db"))
+    PROFILES.update(load_profiles(os.getenv("PROFILES_DIR", "/srv/nodetypes")))
+
+    def discover(ntype: str, node: str) -> None:
+        """新节点出现：按档案代发 HA discovery config（retain，幂等）。"""
+        profile = PROFILES.get(ntype)
+        if not profile:
+            return
+        for topic, payload in discovery_messages(ntype, node, profile):
+            client.publish(topic, payload, retain=True)
+        print(f"[discovery] {ntype}/{node} config 已代发", flush=True)
+
     client = start_mqtt(
         host=os.getenv("MQTT_HOST", "localhost"),
         port=int(os.getenv("MQTT_PORT", "1883")),
         user=os.getenv("MQTT_USER", ""),
         password=os.getenv("MQTT_PASS", ""),
-        on_state=lambda t, n, s, c, r: _on_state(t, n, s, c, r, alerter, store),
-        on_status=lambda t, n, s, r: _on_status(t, n, s, r, store),
-        on_health=_on_health,
+        on_state=lambda t, n, s, c, r: _on_state(t, n, s, c, r, alerter, store, discover),
+        on_status=lambda t, n, s, r: _on_status(t, n, s, r, store, discover),
+        on_health=lambda t, n, r, u: _on_health(t, n, r, u, discover),
     )
     app.state.alerter = alerter
     app.state.mqtt = client
@@ -93,3 +116,9 @@ def list_nodes() -> dict:
 def list_events(limit: int = 50, node: str | None = None) -> list[dict]:
     """事件时间线（SQLite 落盘，重启不丢）：按时间倒序，可按节点过滤。"""
     return app.state.events.query(limit=min(limit, 200), node=node)
+
+
+@app.get("/api/profiles")
+def list_profiles() -> dict:
+    """物模型类型档案（看板按此渲染节点卡片）。"""
+    return PROFILES
