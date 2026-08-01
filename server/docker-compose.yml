@@ -16,6 +16,10 @@ services:
     environment:
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"
+      MQTT_USER: ${MQTT_USER:-}
+      MQTT_PASS: ${MQTT_PASS:-}
+      SCT_SENDKEY: ${SCT_SENDKEY:-}   # Server酱 SendKey，空则告警只打日志
+      ALERT_COOLDOWN_SECONDS: ${ALERT_COOLDOWN_SECONDS:-60}
     ports:
       - "8000:8000"
 
