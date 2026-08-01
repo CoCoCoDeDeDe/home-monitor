@@ -10,7 +10,7 @@ camera-node ×N                                  ┌─ Mosquitto (MQTT over TLS
   ESP32-S3 + OV2640                             ├─ ingest     接收帧流/鉴权
   MJPEG 按需推流 ──────────┐                    ├─ detector   帧差移动侦测 → YOLOv8n 人形确认
                            │                    ├─ recorder   事件快照/短视频存储
-contact-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱/企业微信
+contact-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱
   ESP8266/ESP-01 + 干簧管   │  MQTT/HTTPS        ├─ web        实时监看 + 历史事件 + 布防撤防
   开门即唤醒上报 ──────────┘                    └─ cloudflared  Cloudflare Tunnel 出口
                                                 【客户端】手机/电脑浏览器 → https://域名(Cloudflare)
@@ -28,7 +28,7 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 
 | 链路 | 协议/端口 | 说明 |
 |---|---|---|
-| contact-node → 笔记本 | MQTT `8883`（TLS + 账号密码） | 开门事件、心跳 |
+| contact-node → 笔记本 | MQTT `1883`（账号密码；TLS 8883 后续 ticket 补上） | 开门事件、心跳 |
 | camera-node → 笔记本 | MQTT `8883` + HTTPS POST | 心跳/控制 + 事件帧、SD 分段上传 |
 | 浏览器 → 笔记本（家中） | 局域网 HTTPS | 实时监看、历史回看 |
 | 浏览器 → 笔记本（外网） | Cloudflare Tunnel | cloudflared 主动外连 443，无入站端口 |
@@ -54,6 +54,10 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
   - **干簧管串联供电**（常闭型）：门开 → 上电 → 开机即发 MQTT → 休眠。零待机功耗，电池节点首选。
   - 有插座的位置：ESP8266 开发板（NodeMCU/WeMos）常供电 + GPIO 中断，最简单。
 - **告警防抖**：事件合并 + 冷却时间（同一传感器 60s 内只报一次）+ 布防/撤防开关（离家模式才告警，网页一键切换）。
+- **告警通道**：Server酱 Turbo（免费 5 条/天，防抖后够用）。
+- **MQTT 安全**：先明文 + 账号密码（局域网风险低，快速跑通）；TLS 8883 作为独立 ticket 后续补上。
+- **固件配网**：WiFiManager 配网门户（设备开热点手机配网，换网络免重烧）。
+- **Web 前端**：服务端渲染 + 原生前端（FastAPI + Jinja2/原生 JS），单进程交付，不做 SPA。
 - **外网访问**：Cloudflare Tunnel 命名隧道需要自己的域名，买个便宜后缀（.top/.xyz，~¥10/年）托管到 Cloudflare 即可，免备案。
 
 ## 技术选型
@@ -64,7 +68,8 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 | 通信 | MQTT over TLS（传感器/控制，局域网）+ HTTPS（帧流/Web） |
 | 服务端 | Python FastAPI，Docker Compose（mosquitto + app + cloudflared），跑在旧笔记本 WSL2 |
 | 识别 | 帧差法 + YOLOv8n-INT8（有 N 卡走 CUDA，否则 CPU/ONNX Runtime） |
-| 告警 | Server酱 Turbo / 企业微信应用消息 |
+| 告警 | Server酱 Turbo |
+| 前端 | 服务端渲染（Jinja2 + 原生 JS），随 app 同进程 |
 | 存储 | camera-node SD 卡（全量录像，环形覆盖）+ 服务器 SQLite/文件（事件快照/短视频） |
 | 外网 | Cloudflare Tunnel（免费，自带 HTTPS） |
 

@@ -3,7 +3,7 @@ services:
     image: eclipse-mosquitto:2
     restart: unless-stopped
     ports:
-      - "1883:1883"   # 局域网设备连接；TLS(8883) 在 Phase 1 配置证书后启用
+      - "1883:1883"   # 局域网设备连接（明文+密码）；TLS(8883) 后续 ticket 补上
     volumes:
       - ./mosquitto:/mosquitto/config:ro   # mosquitto.conf + password（password 本地生成，不入库）
       - mosquitto-data:/mosquitto/data
