@@ -11,19 +11,19 @@ camera-node ×N                                  ┌─ Mosquitto (MQTT over TLS
   MJPEG 按需推流 ──────────┐                    ├─ detector   帧差移动侦测 → YOLOv8n 人形确认
                            │                    ├─ recorder   事件快照/短视频存储
 contact-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱
-  ESP8266/ESP-01 + 干簧管   │  MQTT/HTTPS        ├─ web        实时监看 + 历史事件 + 布防撤防
-  开门即唤醒上报 ──────────┘                    └─ cloudflared  Cloudflare Tunnel 出口
-                                                【客户端】手机/电脑浏览器 → https://域名(Cloudflare)
+  ESP8266/ESP-01 + 干簧管   │  MQTT/HTTPS        ├─ web        监控看板（物模型渲染）+ 历史事件 + 布防撤防
+  开门即唤醒上报 ──────────┘                    └─ Tailscale  外网组网出口
+                                                【客户端】手机/电脑装 Tailscale → http://<tailscale-ip>:8000
 ```
 
-所有服务跑在旧笔记本 WSL2 + Docker Compose 里，设备走局域网 WiFi 直连；外网访问经 **Cloudflare Tunnel**（免费、免备案、自带 HTTPS），无需公网 IP、无需 VPS。
+所有服务跑在旧笔记本 WSL2 + Docker Compose 里，设备走局域网 WiFi 直连；外网访问经 **Tailscale 组网**（无公网 IP/CGNAT 场景零成本、WireGuard 加密、零端口开放），Cloudflare Tunnel 作为免客户端分享场景的备选。
 
 ## 组网设计
 
 **单网段扁平组网，路由器零配置**——无端口转发、无 DDNS、无 VLAN，NAT 只走出站连接。
 
 - **WiFi**：所有 ESP 节点连家里路由器的 **2.4GHz** WiFi（ESP8266/ESP32 不支持 5GHz；若路由器 2.4G/5G 合频 SSID 导致配网失败，需拆出独立 2.4G SSID），DHCP 自动分配 IP。
-- **服务器地址固定**：路由器里给笔记本 MAC 做 DHCP 静态绑定（如 `192.168.1.10`），固件中 MQTT/HTTPS 地址统一指向它。
+- **服务器地址**：固件中 MQTT/HTTPS 地址填 **mDNS 主机名**（`<服务器主机名>.local`，节点自解析），换网络环境 IP 变化免重配；Windows 服务器需网络配置为"专用"并放行 UDP 5353（见 deployment.md）。DHCP 静态绑定不再是必要条件。
 - **通信矩阵**：
 
 | 链路 | 协议/端口 | 说明 |
@@ -31,10 +31,28 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 | contact-node → 笔记本 | MQTT `1883`（账号密码；TLS 8883 后续 ticket 补上） | 开门事件、心跳 |
 | camera-node → 笔记本 | MQTT `8883` + HTTPS POST | 心跳/控制 + 事件帧、SD 分段上传 |
 | 浏览器 → 笔记本（家中） | 局域网 HTTPS | 实时监看、历史回看 |
-| 浏览器 → 笔记本（外网） | Cloudflare Tunnel | cloudflared 主动外连 443，无入站端口 |
+| 浏览器 → 笔记本（外网） | Tailscale 虚拟网 | 查看设备装客户端入 tailnet，WireGuard 加密，无入站端口 |
 | 笔记本 → Server酱 | HTTPS 外连 | 告警推送 |
 
-- **断网降级**：宽带/Cloudflare 断了，局域网内监控、SD 卡录像、事件记录全部照常，仅微信推送和外网访问失效，恢复后补发缓存事件。
+- **断网降级**：宽带/Tailscale 断了，局域网内监控、SD 卡录像、事件记录全部照常，仅微信推送和外网访问失效，恢复后补发缓存事件。
+
+## 物模型设计（节点类型通用化）
+
+目标：接入任意新类型 node，前后端代码零改动或极少改动。物模型基底采用 **Home Assistant MQTT Discovery 词汇**（binary_sensor/sensor/camera 等实体类型 + device_class + unit），扩展自有字段（告警级别等）——协议即 HA 方言，将来接入真 Home Assistant 零成本。
+
+**三层约定**：
+
+1. **基础协议**（所有节点类型必须实现，借用物模型"属性/事件"思想）：
+   - `<type>/<id>/status`：LWT 在线状态（retain）
+   - `<type>/<id>/health`：周期健康上报（rssi/uptime，非 retain）
+   - `<type>/<id>/...`：类型专属主题（contact 的 state 即属性；事件带 `cached` 标记可补发）
+   - 服务调用（物模型"服务"要素）预留 `<type>/<id>/svc/+`，摄像头来了再实现
+2. **类型档案（Node Type Profile）**：类型知识全部收进 JSON（`server/app/nodetypes/<type>.json`），HA discovery config 兼容 + 扩展字段；一个 schema 同时驱动看板渲染、payload 校验、告警级别
+3. **渲染**：前端通用渲染器按档案出卡片；未知类型兜底卡片（id/在线/信号/原始字段），新节点永远能显示；复杂类型（摄像头实时画面）才允许注册专用组件
+
+**关键决策：HA discovery config 由服务端按档案代发（retain），不由固件发**——HA 不关心来源，固件保持轻量零改动；将来接真 HA 时 publisher 直接复用。
+
+**接入新节点成本**：简单传感器 = 固件遵守基础协议 + 丢一个档案 JSON；复杂节点 = 再加一个前端专用组件。
 
 ## 关键设计决策
 
@@ -58,7 +76,9 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 - **MQTT 安全**：先明文 + 账号密码（局域网风险低，快速跑通）；TLS 8883 作为独立 ticket 后续补上。
 - **固件配网**：WiFiManager 配网门户（设备开热点手机配网，换网络免重烧）。
 - **Web 前端**：服务端渲染 + 原生前端（FastAPI + Jinja2/原生 JS），单进程交付，不做 SPA。
-- **外网访问**：Cloudflare Tunnel 命名隧道需要自己的域名，买个便宜后缀（.top/.xyz，~¥10/年）托管到 Cloudflare 即可，免备案。
+- **物模型（节点类型通用化）**：见下节「物模型设计」。
+- **事件存储**：事件落盘 **SQLite**（单文件、Python 内置、挂 volume 即可；事件量小 + 单写者，不上 PostgreSQL/MongoDB；标准 SQL 保留平迁路径）。图片/录像等二进制不进库，只存文件路径。
+- **外网访问**：**Tailscale 组网**（宽带 CGNAT 无公网 IP 的现实选择：零成本、WireGuard 端到端加密、零端口开放；每个查看设备装客户端）。备选：Cloudflare Tunnel（浏览器免客户端，适合分享给家人，需要自有域名 ~¥10/年托管 Cloudflare，免备案）。
 
 ## 技术选型
 
@@ -70,8 +90,9 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 | 识别 | 帧差法 + YOLOv8n-INT8（有 N 卡走 CUDA，否则 CPU/ONNX Runtime） |
 | 告警 | Server酱 Turbo |
 | 前端 | 服务端渲染（Jinja2 + 原生 JS），随 app 同进程 |
-| 存储 | camera-node SD 卡（全量录像，环形覆盖）+ 服务器 SQLite/文件（事件快照/短视频） |
-| 外网 | Cloudflare Tunnel（免费，自带 HTTPS） |
+| 存储 | camera-node SD 卡（全量录像，环形覆盖）+ 服务器 SQLite/文件（事件、快照/短视频） |
+| 物模型 | Home Assistant MQTT Discovery 兼容（类型档案 JSON，服务端代发 config） |
+| 外网 | Tailscale 组网（免费，WireGuard 加密；Cloudflare Tunnel 备选） |
 
 ## 硬件采购清单（约 ¥130 一次性 + ¥10/年域名）
 
@@ -79,7 +100,7 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 - **干簧管门窗磁（常开型）× 1**（~¥3）：门开断电/上电方案
 - **电池节点电源 × 1**（~¥15）：18650 + 电池盒 + 3.3V 稳压（AMS1117）
 - 相机用 5V/2A USB 电源 × 2（~¥8/个，有闲置充电头可省）
-- 便宜域名一个（.top/.xyz，~¥10/年，Cloudflare Tunnel 用）
+- 便宜域名一个（.top/.xyz，~¥10/年，**备选** Cloudflare Tunnel 用；当前外网走 Tailscale 不需要）
 - 服务器：旧笔记本复用，¥0（常开电费 ~¥5-10/月）
 
 ## 仓库结构
@@ -98,16 +119,15 @@ home-monitor/
 
 ## 分期实施
 
-1. **Phase 1（最小可用）**：笔记本 WSL2 docker 环境 + MQTT + contact-node 上报 + Server酱告警 → 开门手机收通知
-2. **Phase 2**：camera-node 推流（含 SD 卡录像）+ 网页实时监看
-3. **Phase 3**：移动侦测 + 人形确认 + 事件快照/录像
-4. **Phase 4**：布防撤防、告警策略、多设备管理、Cloudflare Tunnel 外网访问
+1. **Phase 1（最小可用）**：docker 环境 + MQTT + contact-node 上报 + Server酱告警 ✅ → LWT/缓存可靠性 ✅ → 健康上报 ✅ → mDNS 主机名 ✅ → Web 监控看板（物模型）
+2. **Phase 2（摄像头）**：camera-node 推流（含 SD 卡录像）+ 看板实时监看；后续移动侦测 + 人形确认 + 事件快照
+3. **Phase 3（外网访问）**：Tailscale 组网 ✅；布防撤防、告警策略、多设备管理
 
 ## 风险与对策
 
 - 笔记本可用性（关机/睡眠/游戏） → 合盖不睡眠常开；识别限核、游戏时降级；SD 卡边缘录像保底
-- 笔记本离线时门窗事件丢失 → contact-node 固件本地缓存事件，重连后补发
-- Cloudflare Tunnel 国内访问偶发不稳 → 可无缝迁移 VPS 方案（容器整套搬走），或加 ¥25/月 VPS 做 frp 中转
+- 笔记本离线时门窗事件丢失 → contact-node 固件本地缓存事件，重连后经 syncreq/sync 握手补发
+- Tailscale 不可用或需免客户端分享 → 切换 Cloudflare Tunnel 备选方案（容器加一个 cloudflared 即可）
 - SD 卡磨损/掉电损坏 → 分段追加写 + 开机校验，SD 卡作耗材轮换
 - ESP-01 深度睡眠唤醒硬件限制 → 改用干簧管供电方案
 - 相机供电不稳导致重启 → 5V/2A 电源
