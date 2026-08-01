@@ -1,4 +1,4 @@
-"""MQTT 消费：订阅 contact/+/state 与 contact/+/status，事件回调。"""
+"""MQTT 消费：订阅 contact/+/{state,status,health} 与 syncreq，事件回调。"""
 
 import json
 
@@ -6,8 +6,8 @@ import paho.mqtt.client as mqtt
 
 
 def start_mqtt(host: str, port: int, user: str, password: str,
-               on_state, on_status) -> mqtt.Client:
-    """on_state(node, state, cached)；on_status(node, status)"""
+               on_state, on_status, on_health) -> mqtt.Client:
+    """on_state(node, state, cached)；on_status(node, status)；on_health(node, rssi, uptime)"""
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if user:
         client.username_pw_set(user, password)
@@ -17,7 +17,7 @@ def start_mqtt(host: str, port: int, user: str, password: str,
     def on_connect(c, _u, _f, rc, _p=None):
         print(f"[mqtt] connected rc={rc}", flush=True)
         c.subscribe([("contact/+/state", 0), ("contact/+/status", 0),
-                     ("contact/syncreq", 0)])
+                     ("contact/+/health", 0), ("contact/syncreq", 0)])
         # 广播就绪：有缓存事件的节点收到后才补发（避免本端未订阅时补发被丢）
         c.publish("contact/sync", "1")
 
@@ -39,6 +39,10 @@ def start_mqtt(host: str, port: int, user: str, password: str,
             data = json.loads(msg.payload)
         except (ValueError, UnicodeDecodeError):
             print(f"[mqtt] 非法 payload: {msg.topic}", flush=True)
+            return
+        if kind == "health":
+            on_health(data.get("node") or node,
+                      data.get("rssi"), data.get("uptime"))
             return
         print(f"[mqtt] {msg.topic} {data}", flush=True)
         on_state(data.get("node") or node,
