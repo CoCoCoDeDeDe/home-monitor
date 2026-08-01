@@ -1,0 +1,19 @@
+# PlatformIO
+.pio/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 密钥与本地配置（WiFi 密码、MQTT 密码、token 等）
+.env
+secrets.h
+server/mosquitto/password
+*.local.yml
+docker-compose.override.yml
+
+# 编辑器
+.vscode/
+.idea/
