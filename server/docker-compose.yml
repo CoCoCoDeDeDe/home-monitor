@@ -1,0 +1,32 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # 局域网设备连接；TLS(8883) 在 Phase 1 配置证书后启用
+    volumes:
+      - ./mosquitto:/mosquitto/config:ro   # mosquitto.conf + password（password 本地生成，不入库）
+      - mosquitto-data:/mosquitto/data
+
+  app:
+    build: ./app
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+    ports:
+      - "8000:8000"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}   # Phase 4 在 .env 里填入命名隧道 token
+    profiles:
+      - external   # Phase 4 才启用：docker compose --profile external up -d
+
+volumes:
+  mosquitto-data:

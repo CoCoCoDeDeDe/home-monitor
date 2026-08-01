@@ -10,7 +10,7 @@ camera-node ×N                                  ┌─ Mosquitto (MQTT over TLS
   ESP32-S3 + OV2640                             ├─ ingest     接收帧流/鉴权
   MJPEG 按需推流 ──────────┐                    ├─ detector   帧差移动侦测 → YOLOv8n 人形确认
                            │                    ├─ recorder   事件快照/短视频存储
-door-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱/企业微信
+contact-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱/企业微信
   ESP8266/ESP-01 + 干簧管   │  MQTT/HTTPS        ├─ web        实时监看 + 历史事件 + 布防撤防
   开门即唤醒上报 ──────────┘                    └─ cloudflared  Cloudflare Tunnel 出口
                                                 【客户端】手机/电脑浏览器 → https://域名(Cloudflare)
@@ -28,7 +28,7 @@ door-node ×N               ├──局域网 WiFi─────▶ ├─ ale
 
 | 链路 | 协议/端口 | 说明 |
 |---|---|---|
-| door-node → 笔记本 | MQTT `8883`（TLS + 账号密码） | 开门事件、心跳 |
+| contact-node → 笔记本 | MQTT `8883`（TLS + 账号密码） | 开门事件、心跳 |
 | camera-node → 笔记本 | MQTT `8883` + HTTPS POST | 心跳/控制 + 事件帧、SD 分段上传 |
 | 浏览器 → 笔记本（家中） | 局域网 HTTPS | 实时监看、历史回看 |
 | 浏览器 → 笔记本（外网） | Cloudflare Tunnel | cloudflared 主动外连 443，无入站端口 |
@@ -83,7 +83,7 @@ door-node ×N               ├──局域网 WiFi─────▶ ├─ ale
 home-monitor/
 ├── firmware/
 │   ├── camera-node/    # PlatformIO, ESP32-S3 + OV2640
-│   └── door-node/      # PlatformIO, ESP8266/ESP-01 + 干簧管
+│   └── contact-node/      # PlatformIO, ESP8266/ESP-01 + 干簧管
 ├── server/
 │   ├── docker-compose.yml   # mosquitto + app + cloudflared
 │   └── app/            # FastAPI：MQTT 消费/流转发/检测/告警/Web
@@ -93,7 +93,7 @@ home-monitor/
 
 ## 分期实施
 
-1. **Phase 1（最小可用）**：笔记本 WSL2 docker 环境 + MQTT + door-node 上报 + Server酱告警 → 开门手机收通知
+1. **Phase 1（最小可用）**：笔记本 WSL2 docker 环境 + MQTT + contact-node 上报 + Server酱告警 → 开门手机收通知
 2. **Phase 2**：camera-node 推流（含 SD 卡录像）+ 网页实时监看
 3. **Phase 3**：移动侦测 + 人形确认 + 事件快照/录像
 4. **Phase 4**：布防撤防、告警策略、多设备管理、Cloudflare Tunnel 外网访问
@@ -101,7 +101,7 @@ home-monitor/
 ## 风险与对策
 
 - 笔记本可用性（关机/睡眠/游戏） → 合盖不睡眠常开；识别限核、游戏时降级；SD 卡边缘录像保底
-- 笔记本离线时门窗事件丢失 → door-node 固件本地缓存事件，重连后补发
+- 笔记本离线时门窗事件丢失 → contact-node 固件本地缓存事件，重连后补发
 - Cloudflare Tunnel 国内访问偶发不稳 → 可无缝迁移 VPS 方案（容器整套搬走），或加 ¥25/月 VPS 做 frp 中转
 - SD 卡磨损/掉电损坏 → 分段追加写 + 开机校验，SD 卡作耗材轮换
 - ESP-01 深度睡眠唤醒硬件限制 → 改用干簧管供电方案
