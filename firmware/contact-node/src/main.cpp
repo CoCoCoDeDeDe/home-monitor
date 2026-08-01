@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <WiFiUdp.h>      // MQTT host 主机名解析：手写最小 mDNS A 查询（LEAmDNS 无主机查询 API）
 #include <WiFiManager.h>   // 配网门户：首次/配网失败时开热点 contact-node-setup
 #include <PubSubClient.h>
 #include <LittleFS.h>
@@ -33,10 +34,14 @@ WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
 
 // MQTT 参数：默认值仅首次使用，配网后持久化到 LittleFS
-char mqttHost[40] = "192.168.1.10";
+// host 可填 IP 或 mDNS 主机名（<服务器主机名>.local，换网络免 IP 重配）
+char mqttHost[40] = "home-monitor-server.local";
 char mqttPort[6] = "1883";
 char mqttUser[24] = "";
 char mqttPass[24] = "";
+
+char mqttTarget[40];    // 实际连接目标：mDNS 解析出的 IP 或原样 host
+int resolveFailCount = 0;  // 主机名模式连续连接失败计数，触发重新解析
 
 char nodeId[24];      // contact-<chipid>，每块板唯一
 char topicState[40];  // contact/<chipid>/state
@@ -133,9 +138,137 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
   }
 }
 
+// ---- 最小 mDNS A 记录查询（组播 224.0.0.251:5353，DNS 报文格式） ----
+// 跳过 DNS 名字段（标签序列或压缩指针），返回名字结束后的偏移
+int mdnsSkipName(const uint8_t* b, int len, int i) {
+  while (i < len) {
+    uint8_t c = b[i];
+    if (c == 0) return i + 1;
+    if ((c & 0xC0) == 0xC0) return i + 2;  // 压缩指针占 2 字节
+    i += c + 1;
+  }
+  return len;
+}
+
+// 比较 offset 处的 DNS 名（可为标签序列/压缩指针）与我们的 qname 是否一致（不区分大小写）
+bool mdnsNameEq(const uint8_t* b, int len, int i, const uint8_t* qname, int qlen) {
+  int qi = 0, hops = 0;
+  while (i < len && qi < qlen && hops++ < 8) {
+    uint8_t c = b[i];
+    if ((c & 0xC0) == 0xC0) {  // 压缩指针：跳到目标继续比
+      if (i + 1 >= len) return false;
+      i = ((c & 0x3F) << 8) | b[i + 1];
+      continue;
+    }
+    if (c != qname[qi]) return false;  // 标签长度必须一致（0 即双方同时结束）
+    for (int k = 1; k <= c; k++) {
+      if (i + k >= len || qi + k >= qlen) return false;
+      if (tolower(b[i + k]) != tolower(qname[qi + k])) return false;
+    }
+    if (c == 0) return true;
+    i += c + 1;
+    qi += c + 1;
+  }
+  return false;
+}
+
+// 从 mDNS 应答里找 NAME 与查询匹配的 A 记录（TYPE=1, RDLEN=4）。
+// 组播应答常不带 question 段，所以校验 answer 的名字，过滤网络上无关 mDNS 报文
+IPAddress mdnsParseA(const uint8_t* b, int len, const uint8_t* qname, int qlen) {
+  if (len < 12 || !(b[2] & 0x80)) return INADDR_NONE;  // 必须是应答报文
+  uint16_t qd = (b[4] << 8) | b[5], an = (b[6] << 8) | b[7];
+  int i = 12;
+  for (int q = 0; q < qd && i < len; q++) {
+    i = mdnsSkipName(b, len, i) + 4;  // 名字 + QTYPE/QCLASS
+  }
+  for (int a = 0; a < an && i < len; a++) {
+    bool mine = mdnsNameEq(b, len, i, qname, qlen);
+    i = mdnsSkipName(b, len, i);
+    if (i + 10 > len) break;
+    uint16_t type = (b[i] << 8) | b[i + 1];
+    uint16_t rdlen = (b[i + 8] << 8) | b[i + 9];
+    i += 10;  // TYPE/CLASS/TTL/RDLENGTH
+    if (i + rdlen > len) break;
+    if (mine && type == 1 && rdlen == 4) return IPAddress(b[i], b[i + 1], b[i + 2], b[i + 3]);
+    i += rdlen;
+  }
+  return INADDR_NONE;
+}
+
+// 组播查询 hostname（不带 .local 后缀）的 A 记录，超时返回 INADDR_NONE
+IPAddress mdnsQueryA(const char* hostname, uint32_t timeoutMs) {
+  uint8_t pkt[128];
+  memset(pkt, 0, 12);
+  pkt[5] = 1;  // QDCOUNT=1
+  size_t n = 12;
+  const char* p = hostname;
+  while (*p) {  // 按 '.' 切 label 写入 QNAME
+    const char* next = strchr(p, '.');
+    size_t l = next ? (size_t)(next - p) : strlen(p);
+    if (l == 0 || l > 63 || n + l + 6 >= sizeof(pkt)) return INADDR_NONE;
+    pkt[n++] = (uint8_t)l;
+    memcpy(pkt + n, p, l);
+    n += l;
+    if (!next) break;
+    p = next + 1;
+  }
+  memcpy(pkt + n, "\x05local", 6);  // mDNS 名字必须带 local 后缀
+  n += 6;
+  pkt[n++] = 0;
+  pkt[n++] = 0; pkt[n++] = 1;  // QTYPE=A
+  pkt[n++] = 0; pkt[n++] = 1;  // QCLASS=IN
+  const uint8_t* qname = pkt + 12;  // label 序列（含结尾 0），用于校验应答归属
+  int qlen = (int)n - 12 - 4;
+
+  WiFiUDP udp;
+  IPAddress multicast(224, 0, 0, 251);
+  if (!udp.beginMulticast(WiFi.localIP(), multicast, 5353)) return INADDR_NONE;
+
+  // 组播无线投递不可靠（无 ACK、可能被丢弃）：查询最多发 3 次，分段等待
+  for (int attempt = 0; attempt < 3; attempt++) {
+    udp.beginPacketMulticast(multicast, 5353, WiFi.localIP());
+    udp.write(pkt, n);
+    udp.endPacket();
+    unsigned long start = millis();
+    while (millis() - start < timeoutMs / 3) {
+      int sz = udp.parsePacket();
+      if (sz >= 12) {
+        uint8_t buf[512];
+        int r = udp.read(buf, sz > (int)sizeof(buf) ? (int)sizeof(buf) : sz);
+        IPAddress ip = mdnsParseA(buf, r, qname, qlen);
+        if (ip.isSet()) { udp.stop(); return ip; }
+      }
+      delay(10);
+    }
+  }
+  udp.stop();
+  return INADDR_NONE;
+}
+
+// MQTT host 解析：IP 原样用；主机名走 mDNS 查询，失败回退原样（交系统 DNS）
+bool resolveMqttHost() {
+  IPAddress ip;
+  if (ip.fromString(mqttHost)) {
+    strncpy(mqttTarget, mqttHost, sizeof(mqttTarget) - 1);
+    return true;
+  }
+  String h = mqttHost;
+  if (h.endsWith(".local")) h.remove(h.length() - 6);
+  IPAddress rip = mdnsQueryA(h.c_str(), 2000);
+  if (rip.isSet()) {
+    snprintf(mqttTarget, sizeof(mqttTarget), "%s", rip.toString().c_str());
+    Serial.printf("mdns %s -> %s\n", mqttHost, mqttTarget);
+    return true;
+  }
+  strncpy(mqttTarget, mqttHost, sizeof(mqttTarget) - 1);
+  Serial.printf("mdns resolve %s failed, use as-is\n", mqttHost);
+  return false;
+}
+
 bool mqttConnect() {
   // clientId 用 nodeId；LWT：异常掉线时 broker 发布 status=offline（QoS1 retain）
   if (mqtt.connect(nodeId, mqttUser, mqttPass, topicStatus, 1, true, "offline")) {
+    resolveFailCount = 0;
     Serial.println("mqtt connected");
     mqtt.publish(topicStatus, "online", true);  // 上线标记
     // 上线即上报当前状态，保证 broker 里 retain 的是最新值
@@ -145,7 +278,14 @@ bool mqttConnect() {
     if (eventsPending()) requestSync();
     return true;
   }
-  Serial.printf("mqtt connect failed rc=%d (target %s:%s)\n", mqtt.state(), mqttHost, mqttPort);
+  Serial.printf("mqtt connect failed rc=%d (target %s:%s)\n", mqtt.state(), mqttTarget, mqttPort);
+  // 主机名模式持续失败（>30s）：重新解析，服务器 IP 可能已变（换网络环境）
+  IPAddress tmp;
+  if (!tmp.fromString(mqttHost) && ++resolveFailCount >= 6) {
+    resolveFailCount = 0;
+    resolveMqttHost();
+    mqtt.setServer(mqttTarget, atoi(mqttPort));
+  }
   return false;
 }
 
@@ -210,9 +350,11 @@ void setup() {
   strncpy(mqttUser, pUser.getValue(), sizeof(mqttUser) - 1);
   strncpy(mqttPass, pPass.getValue(), sizeof(mqttPass) - 1);
 
-  mqtt.setServer(mqttHost, atoi(mqttPort));
+  // host 是主机名则先 mDNS 解析出 IP 再连
+  resolveMqttHost();
+  mqtt.setServer(mqttTarget, atoi(mqttPort));
   mqtt.setCallback(onMqttMessage);
-  Serial.printf("wifi ok, mqtt -> %s:%s\n", mqttHost, mqttPort);
+  Serial.printf("wifi ok, mqtt -> %s:%s\n", mqttTarget, mqttPort);
 }
 
 void loop() {

@@ -53,8 +53,18 @@ Docker Desktop（WSL2 后端）的端口发布**默认只在 localhost 可达**�
 ## contact-node 固件
 
 - 首次/重配：开机后 1.5s 内按住 FLASH 键 ≥300ms → 清空配置 → 热点 `contact-node-setup` → `192.168.4.1` 配网（WiFi + MQTT 四项）
+  - 注意按键时序：先按 RST 松手、**再**在 1.5s 窗口内按住 FLASH；RST 之前就按住 FLASH 会进 ROM 下载模式
 - MQTT 参数经 LittleFS 持久化，重启不丢（WiFiManager 自定义参数不落盘，必须自己存）
+- MQTT host 可填 IP 或 **mDNS 主机名**（`<服务器主机名>.local`）：主机名由固件手写最小 mDNS A 查询解析（LEAmDNS 无主机查询 API），解析失败回退原样；持续连接失败 >30s 自动重新解析。**换网络环境（IP 变化）免重配**，建议直接填主机名
 - 干簧管接 D1(GPIO5) 与 GND：断开=开门（`open`），闭合=关门（`closed`）
+
+### mDNS 主机名对服务器的要求（Windows）
+
+- 网络配置文件须为**专用（Private）**：`Set-NetConnectionProfile -InterfaceAlias WLAN -NetworkCategory Private`（公用配置下 Windows 不应答外部 mDNS 查询，仅对可信网络开启）
+- 防火墙放行 mDNS（管理员 PowerShell）：
+  ```powershell
+  New-NetFirewallRule -DisplayName 'home-monitor-mdns-5353' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 5353 -Profile Any
+  ```
 
 ## 串口驱动
 
