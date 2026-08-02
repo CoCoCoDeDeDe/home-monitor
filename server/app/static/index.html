@@ -20,6 +20,12 @@
   .warn  { color: #fbbf24; } .badge.warn  { background: #553a0f; color: #fbbf24; }
   .info  { color: #60a5fa; } .badge.info  { background: #1e3a5f; color: #60a5fa; }
   .off   { color: #6b7280; } .badge.off   { background: #374151; color: #9ca3af; }
+  .gear { float: right; background: none; border: none; color: #8a93a8; cursor: pointer; font-size: 13px; }
+  .gear:hover { color: #dde3ee; }
+  #cfg { background: #1a2130; border: 1px solid #2a3348; border-radius: 10px; padding: 12px; margin-bottom: 10px; font-size: 13px; line-height: 2; }
+  #cfg input, #cfg select { background: #0f1420; color: #dde3ee; border: 1px solid #2a3348; border-radius: 6px; padding: 4px 8px; margin: 0 6px 0 0; }
+  #cfg button { background: #1e3a5f; color: #60a5fa; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; margin-right: 6px; }
+  #cfg .hint { color: #8a93a8; font-size: 11px; line-height: 1.5; }
   .evt { background: #1a2130; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
          font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
   .evt .time { color: #8a93a8; font-size: 11px; white-space: nowrap; }
@@ -29,6 +35,7 @@
 </head>
 <body>
 <h1>home-monitor 看板</h1>
+<div id="cfg" style="display:none"></div>
 <h2>节点</h2>
 <div class="grid" id="nodes"></div>
 <h2>事件</h2>
@@ -49,37 +56,28 @@ function fmtTime(ts) {
   return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
 }
 
-// 档案驱动渲染：有档案按档案，无档案兜底通用卡片
-function nodeCard(node, id, profile) {
+// 卡片渲染：显示文案全部来自图输出（display），前端不懂翻译
+function nodeCard(node, id) {
   const online = node.status === 'online';
   const badge = `<span class="badge ${online ? 'ok' : 'off'}">${online ? '在线' : '离线'}</span>`;
-  if (!profile) {  // 未知类型兜底：永远能显示
-    return `<div class="card"><div class="label">${esc(node.type || '?')} / ${esc(id)} ${badge}</div>
-      <div class="primary">未注册类型</div><pre>${esc(JSON.stringify(node, null, 1))}</pre></div>`;
-  }
-  const d = profile.dashboard || {};
-  let primary = '';
-  if (d.primary) {
-    const v = node[d.primary.field];
-    const m = (d.primary.map || {})[v] || { text: v ?? '-', level: 'info' };
-    primary = `<div class="primary ${m.level}">${esc(m.text)}</div>`;
-  }
+  const gear = `<button class="gear" onclick="openCfg('${esc(id)}')" title="配置节点">⚙</button>`;
+  const d = node.display || {};
+  const title = d.alias ? `${esc(d.alias)} / ${esc(id)}` : `${esc(node.type || '?')} / ${esc(id)}`;
+  const primary = d.text
+    ? `<div class="primary ${d.level || 'info'}">${esc(d.text)}</div>`
+    : `<div class="primary info">${esc(node.state ?? '-')}</div>`;  // 图尚未求值时兜底原始值
   let fields = '';
-  for (const [f, cfg] of Object.entries(d.fields || {})) {
-    let v = node[f];
-    if (v == null) continue;
-    if (cfg.format === 'duration') v = fmtDuration(v);
-    fields += `<div>${esc(cfg.label)}: ${esc(v)}${esc(cfg.unit || '')}</div>`;
-  }
-  return `<div class="card"><div class="label">${esc(profile.label || profile.type)} / ${esc(id)} ${badge}</div>
+  if (node.rssi != null) fields += `<div>信号: ${esc(node.rssi)}dBm</div>`;
+  if (node.uptime != null) fields += `<div>在线: ${esc(fmtDuration(node.uptime))}</div>`;
+  return `<div class="card"><div class="label">${title} ${badge}${gear}</div>
     ${primary}<div class="meta">${fields}</div></div>`;
 }
 
-function eventText(e, profile) {
-  const d = profile && profile.dashboard;
-  const st = e.payload && e.payload.state;
-  if (e.kind === 'state' && d && d.events && d.events[st]) {
-    const m = d.events[st];
+// 事件列表：历史事件落的是原始值，用节点当前翻译表（map）翻译成当前语义文案
+function eventText(e, nodeOf) {
+  if (e.kind === 'state') {
+    const raw = e.payload && e.payload.state;
+    const m = ((nodeOf(e.node) || {}).map || {})[raw] || { text: raw, level: 'info' };
     return `<span class="${m.level}">${esc(m.text)}</span>` +
       (e.payload.cached ? ' <span class="badge info">补发</span>' : '');
   }
@@ -90,6 +88,63 @@ function eventText(e, profile) {
   return `<span class="info">${esc(e.kind)}</span> <pre style="display:inline">${esc(JSON.stringify(e.payload))}</pre>`;
 }
 
+// ---- 节点配置（Issue #27）：表单 = 节点子图的投影 ----
+// 用户直接定义每个原始值（triggered/released）对应的文案与告警级别；
+// 模板下拉只是预填，保存后与模板无关联。
+let cfgNode = null;
+let cfgMap = {};
+let cfgRaws = [];
+const RAW_STATES = ['1', '0'];  // 布尔固件词表（1=触发/0=释放）；历史词键动态补充
+const RAW_LABELS = { '1': '触发', '0': '释放', triggered: '历史词', released: '历史词', open: '历史词', closed: '历史词' };
+
+async function openCfg(id) {
+  cfgNode = id;
+  const cfg = await fetch(`/api/nodes/${encodeURIComponent(id)}/config`).then(r => r.json());
+  cfgMap = cfg.map || {};
+  cfgRaws = [...RAW_STATES, ...Object.keys(cfgMap).filter(k => !RAW_STATES.includes(k))];
+  const tplOpts = ['<option value="">模板预填…</option>'].concat(
+    Object.entries(lastProfiles).filter(([, p]) => p.template)
+      .map(([t, p]) => `<option value="${esc(t)}">${esc(p.label || t)}</option>`));
+  const rows = cfgRaws.map(raw => {
+    const m = cfgMap[raw] || { text: '', level: 'info' };
+    const lv = `<select id="cfgLv_${raw}">
+      ${['info', 'ok', 'warn'].map(l => `<option value="${l}" ${m.level === l ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+    return `<div>${esc(raw)}（${esc(RAW_LABELS[raw] || raw)}时）:
+      文案 <input id="cfgTx_${raw}" size="12" value="${esc(m.text)}"> 级别 ${lv}</div>`;
+  }).join('');
+  $('cfg').style.display = 'block';
+  $('cfg').innerHTML = `<b>配置节点 ${esc(id)}</b><br>
+    别名 <input id="cfgAlias" size="16" placeholder="如：平台窗户" value="${esc(cfg.alias || '')}">
+    告警冷却 <input id="cfgCd" size="4" type="number" min="0" value="${esc(cfg.cooldown ?? 60)}"> 秒
+    <select id="cfgTpl" onchange="applyTpl()">${tplOpts.join('')}</select>
+    ${rows}
+    <div><button onclick="saveCfg()">保存</button><button onclick="$('cfg').style.display='none'">取消</button></div>
+    <div class="hint">你在定义这个传感器 0/1 各是什么意思：文案=显示与告警用语，warn 级别才推送告警。
+    模板只是预填，可随意改。保存后立即生效，无需改固件。</div>`;
+}
+function applyTpl() {
+  const t = $('cfgTpl').value;
+  const tpl = lastProfiles[t] && lastProfiles[t].template;
+  if (!tpl) return;
+  for (const raw of cfgRaws) {
+    const m = (tpl.map || {})[raw];
+    if (m) { $('cfgTx_' + raw).value = m.text || ''; $('cfgLv_' + raw).value = m.level || 'info'; }
+  }
+}
+async function saveCfg() {
+  const map = {};
+  for (const raw of cfgRaws) {
+    map[raw] = { text: $('cfgTx_' + raw).value, level: $('cfgLv_' + raw).value };
+  }
+  const body = { alias: $('cfgAlias').value, map, cooldown: Number($('cfgCd').value) || 60 };
+  const r = await fetch(`/api/nodes/${encodeURIComponent(cfgNode)}/config`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { alert('保存失败: ' + await r.text()); return; }
+  $('cfg').style.display = 'none';
+  refresh();
+}
+
+let lastProfiles = {};
 async function refresh() {
   try {
     const [profiles, nodes, events] = await Promise.all([
@@ -97,10 +152,12 @@ async function refresh() {
       fetch('/nodes').then(r => r.json()),
       fetch('/api/events?limit=30').then(r => r.json()),
     ]);
+    lastProfiles = profiles;
+    const nodeOf = (nid) => nodes[nid];
     $('nodes').innerHTML = Object.entries(nodes)
-      .map(([id, n]) => nodeCard(n, id, profiles[n.type])).join('') || '<div class="card">无节点</div>';
+      .map(([id, n]) => nodeCard(n, id)).join('') || '<div class="card">无节点</div>';
     $('events').innerHTML = events
-      .map(e => `<div class="evt"><span class="time">${fmtTime(e.ts)}</span><span class="node">${esc(e.node)}</span>${eventText(e, profiles[e.type])}</div>`)
+      .map(e => `<div class="evt"><span class="time">${fmtTime(e.ts)}</span><span class="node">${esc(((nodeOf(e.node) || {}).display || {}).alias || e.node)}</span>${eventText(e, nodeOf)}</div>`)
       .join('') || '<div class="evt">无事件</div>';
   } catch (err) {
     console.error(err);

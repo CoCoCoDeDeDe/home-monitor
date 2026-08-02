@@ -1,0 +1,15 @@
+{
+  "type": "presence",
+  "label": "在位",
+  "comment": "表单预填模板（Issue #27 图引擎）：物体在位/移开场景。键 1/0 为布尔固件词表；open/closed/triggered/released 为历史词，仅服务旧事件记录翻译。",
+  "template": {
+    "map": {
+      "1":         { "text": "物体在位", "level": "info" },
+      "0":         { "text": "物体移开", "level": "warn" },
+      "open":      { "text": "物体在位", "level": "info" },
+      "closed":    { "text": "物体移开", "level": "warn" },
+      "triggered": { "text": "物体在位", "level": "info" },
+      "released":  { "text": "物体移开", "level": "warn" }
+    }
+  }
+}
