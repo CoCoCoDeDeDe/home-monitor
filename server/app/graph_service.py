@@ -12,9 +12,11 @@ from graph_store import GraphStore
 
 
 def default_map(profiles: dict, ntype: str) -> dict:
-    """默认翻译表 = 固件类型档案的 dashboard.events（原始词汇文案）。"""
+    """默认翻译表 = 固件类型档案的 dashboard.events（硬件档案），
+    无 dashboard 时退到 template.map（模板文件，兼容过渡期的 contact 固件词表）。"""
     p = profiles.get(ntype) or {}
-    return dict(((p.get("dashboard") or {}).get("events")) or {})
+    return dict(((p.get("dashboard") or {}).get("events"))
+                or ((p.get("template") or {}).get("map")) or {})
 
 
 def standard_graph(ntype: str, node: str, alias: str, map_: dict, cooldown: int) -> dict:
@@ -41,6 +43,7 @@ class GraphService:
         self._publish = publish
         self._graphs: dict[str, Graph] = {}
         self._specs: dict[str, dict] = {}  # 重建用（Graph 内部结构不暴露 spec）
+        self._ntypes: dict[str, str] = {}  # node → 固件类型（合并默认翻译表用）
         for nid, spec in store.load_all().items():
             try:
                 self._graphs[nid] = Graph(spec)
@@ -49,6 +52,7 @@ class GraphService:
                 print(f"[graph] 节点 {nid} 图加载失败跳过: {e}", flush=True)
 
     def _ensure(self, ntype: str, node: str) -> Graph:
+        self._ntypes[node] = ntype
         if node not in self._graphs:
             spec = standard_graph(ntype, node, "", default_map(self._profiles, ntype), 60)
             self._graphs[node] = Graph(spec)
@@ -70,27 +74,34 @@ class GraphService:
         return (g.output("disp1", "view") or {}) if g else {}
 
     def translate_map_of(self, node: str) -> dict:
+        """节点生效翻译表：默认表为底 + 图内 map 覆盖（看板事件列表翻译历史原始值用）。"""
         g = self._graphs.get(node)
-        return ((g.block_params("sem1") or {}).get("map") or {}) if g else {}
+        saved = ((g.block_params("sem1") or {}).get("map") or {}) if g else {}
+        return {**default_map(self._profiles, self._ntypes.get(node, "")), **saved}
 
     def projection(self, ntype: str, node: str) -> dict:
-        """表单读：从标准块 params 提取；无图按默认值投影（不落库）。"""
+        """表单读：从标准块 params 提取；无图按默认值投影（不落库）。
+        map 合并默认表为底：固件词表里的键（如过渡期 contact 的 open/closed）
+        不会因用户只保存了部分键而丢失翻译。"""
         self._ensure(ntype, node)
         g = self._graphs[node]
+        saved = (g.block_params("sem1") or {}).get("map") or {}
         return {
             "alias": (g.block_params("disp1") or {}).get("alias", ""),
-            "map": (g.block_params("sem1") or {}).get("map")
-                   or default_map(self._profiles, ntype),
+            "map": {**default_map(self._profiles, ntype), **saved},
             "cooldown": (g.block_params("alm1") or {}).get("cooldown", 60),
         }
 
     def apply_form(self, ntype: str, node: str, alias: str,
                    map_: dict, cooldown: int) -> dict:
-        """表单写：重建标准子图 + 落库 + 热加载。GraphError 由 API 层转 400。"""
-        spec = standard_graph(ntype, node, alias, map_, cooldown)
+        """表单写：重建标准子图 + 落库 + 热加载。GraphError 由 API 层转 400。
+        map 合并默认表为底：用户只编辑部分键时，固件词表其余键翻译不丢。"""
+        spec = standard_graph(ntype, node, alias,
+                              {**default_map(self._profiles, ntype), **map_}, cooldown)
         g = Graph(spec)  # 先校验，非法图不入库
         self._store.save(node, spec)
         self._graphs[node] = g
         self._specs[node] = spec
+        self._ntypes[node] = ntype
         print(f"[graph] {node}: 表单已应用（alias={alias!r}）", flush=True)
         return self.projection(ntype, node)

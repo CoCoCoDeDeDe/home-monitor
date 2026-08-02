@@ -93,20 +93,23 @@ function eventText(e, nodeOf) {
 // 模板下拉只是预填，保存后与模板无关联。
 let cfgNode = null;
 let cfgMap = {};
-const RAW_STATES = ['triggered', 'released'];
+let cfgRaws = [];
+const RAW_STATES = ['triggered', 'released'];  // collision 固件词表；其余键（如旧词 open/closed）动态补充
+const RAW_LABELS = { triggered: '触发', released: '释放', open: '旧词·开', closed: '旧词·关' };
 
 async function openCfg(id) {
   cfgNode = id;
   const cfg = await fetch(`/api/nodes/${encodeURIComponent(id)}/config`).then(r => r.json());
   cfgMap = cfg.map || {};
+  cfgRaws = [...RAW_STATES, ...Object.keys(cfgMap).filter(k => !RAW_STATES.includes(k))];
   const tplOpts = ['<option value="">模板预填…</option>'].concat(
     Object.entries(lastProfiles).filter(([, p]) => p.template)
       .map(([t, p]) => `<option value="${esc(t)}">${esc(p.label || t)}</option>`));
-  const rows = RAW_STATES.map(raw => {
+  const rows = cfgRaws.map(raw => {
     const m = cfgMap[raw] || { text: '', level: 'info' };
     const lv = `<select id="cfgLv_${raw}">
       ${['info', 'ok', 'warn'].map(l => `<option value="${l}" ${m.level === l ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
-    return `<div>${esc(raw)}（${raw === 'triggered' ? '触发' : '释放'}时）:
+    return `<div>${esc(raw)}（${esc(RAW_LABELS[raw] || raw)}时）:
       文案 <input id="cfgTx_${raw}" size="12" value="${esc(m.text)}"> 级别 ${lv}</div>`;
   }).join('');
   $('cfg').style.display = 'block';
@@ -123,14 +126,14 @@ function applyTpl() {
   const t = $('cfgTpl').value;
   const tpl = lastProfiles[t] && lastProfiles[t].template;
   if (!tpl) return;
-  for (const raw of RAW_STATES) {
+  for (const raw of cfgRaws) {
     const m = (tpl.map || {})[raw];
     if (m) { $('cfgTx_' + raw).value = m.text || ''; $('cfgLv_' + raw).value = m.level || 'info'; }
   }
 }
 async function saveCfg() {
   const map = {};
-  for (const raw of RAW_STATES) {
+  for (const raw of cfgRaws) {
     map[raw] = { text: $('cfgTx_' + raw).value, level: $('cfgLv_' + raw).value };
   }
   const body = { alias: $('cfgAlias').value, map, cooldown: Number($('cfgCd').value) || 60 };

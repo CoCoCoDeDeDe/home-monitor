@@ -1,11 +1,13 @@
 {
   "type": "presence",
   "label": "在位",
-  "comment": "表单预填模板（Issue #27 图引擎）：物体在位/移开场景。",
+  "comment": "表单预填模板（Issue #27 图引擎）：物体在位/移开场景。open/closed 键为过渡期兼容（旧固件词表）。",
   "template": {
     "map": {
       "triggered": { "text": "物体在位", "level": "info" },
-      "released":  { "text": "物体移开", "level": "warn" }
+      "released":  { "text": "物体移开", "level": "warn" },
+      "open":      { "text": "物体在位", "level": "info" },
+      "closed":    { "text": "物体移开", "level": "warn" }
     }
   }
 }

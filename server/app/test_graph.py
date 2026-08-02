@@ -187,6 +187,34 @@ def test_service_alert_link():
 check("service_default_and_form", test_service_default_and_form)
 check("service_alert_link", test_service_alert_link)
 
+def test_transition_vocab_merge():
+    """过渡期兼容：contact 固件词表（open/closed）经模板 map 兜底 + 合并。"""
+    import tempfile, os
+    from graph_store import GraphStore
+    from graph_service import GraphService, default_map
+    profiles = {"contact": {"template": {"map": {
+        "triggered": {"text": "门窗打开", "level": "warn"},
+        "released": {"text": "门窗关闭", "level": "info"},
+        "open": {"text": "门窗打开", "level": "warn"},
+        "closed": {"text": "门窗关闭", "level": "info"}}}}}
+    # default_map 无 dashboard 时退到 template.map
+    assert default_map(profiles, "contact")["open"]["text"] == "门窗打开"
+    db = tempfile.mktemp(suffix=".db")
+    gs = GraphStore(db)
+    svc = GraphService(gs, profiles, "", None)
+    # 用户只保存了 triggered 自定义：open/closed 默认键合并保留
+    svc.apply_form("contact", "6750f8", "", {"triggered": {"text": "自定义", "level": "warn"}}, 60)
+    proj = svc.projection("contact", "6750f8")
+    assert proj["map"]["triggered"]["text"] == "自定义", "用户自定义优先"
+    assert proj["map"]["open"]["text"] == "门窗打开", "projection 合并默认键"
+    assert svc.translate_map_of("6750f8")["open"]["text"] == "门窗打开", "translate_map 合并默认键"
+    # 保存后的图实时翻译 open/closed 也生效
+    svc.feed_state("contact", "6750f8", "open", 1_700_000_000.0)
+    assert svc.display_of("6750f8")["text"] == "门窗打开", "旧固件词实时翻译"
+    gs.close(); os.unlink(db)
+
+check("transition_vocab_merge", test_transition_vocab_merge)
+
 def test_main_on_state_link():
     import tempfile, os
     for name in ["fastapi", "pydantic", "paho", "paho.mqtt", "paho.mqtt.client"]:
