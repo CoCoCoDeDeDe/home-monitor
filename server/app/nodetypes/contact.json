@@ -1,13 +1,15 @@
 {
   "type": "contact",
   "label": "门窗",
-  "comment": "表单预填模板（Issue #27 图引擎）：只是帮用户预填翻译块 map，与系统无持续关联。原 ha/dashboard 职责已由 collision.json（硬件档案）与图输出接管。open/closed 键为过渡期兼容：固件刷 collision 前，现存 contact 固件词表也能翻译。",
+  "comment": "表单预填模板（Issue #27 图引擎）：只是帮用户预填翻译块 map，与系统无持续关联。键 1/0 为布尔固件词表（1=触发/0=释放）；open/closed/triggered/released 为历史词，仅服务旧事件记录翻译。",
   "template": {
     "map": {
-      "triggered": { "text": "门窗打开", "level": "warn" },
-      "released":  { "text": "门窗关闭", "level": "info" },
+      "1":         { "text": "门窗打开", "level": "warn" },
+      "0":         { "text": "门窗关闭", "level": "info" },
       "open":      { "text": "门窗打开", "level": "warn" },
-      "closed":    { "text": "门窗关闭", "level": "info" }
+      "closed":    { "text": "门窗关闭", "level": "info" },
+      "triggered": { "text": "门窗打开", "level": "warn" },
+      "released":  { "text": "门窗关闭", "level": "info" }
     }
   }
 }

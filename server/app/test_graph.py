@@ -33,13 +33,14 @@ check("store_roundtrip", test_store_roundtrip)
 def test_translate_block():
     from blocks import BLOCKS
     b = BLOCKS["translate"]
-    params = {"map": {"triggered": {"text": "门窗打开", "level": "warn"},
-                      "released": {"text": "门窗关闭", "level": "info"}}}
+    params = {"map": {"1": {"text": "门窗打开", "level": "warn"},
+                      "0": {"text": "门窗关闭", "level": "info"}}}
     st = {}
-    r1 = b.evaluate(params, {"in": {"raw": "triggered", "ts": 1.0}}, st, 1.0, {})
-    assert r1["out"]["text"] == "门窗打开" and r1["out"]["level"] == "warn"
+    r1 = b.evaluate(params, {"in": {"raw": 1, "ts": 1.0}}, st, 1.0, {})
+    assert r1["out"]["text"] == "门窗打开" and r1["out"]["level"] == "warn", "int raw 按 str 查 map"
+    assert r1["out"]["raw"] == 1, "raw 原样透传（存布尔）"
     assert "event" not in r1, "首个值不应产生 event（防开机/retain 误告警）"
-    r2 = b.evaluate(params, {"in": {"raw": "released", "ts": 2.0}}, st, 2.0, {})
+    r2 = b.evaluate(params, {"in": {"raw": 0, "ts": 2.0}}, st, 2.0, {})
     assert r2["event"]["text"] == "门窗关闭", "raw 变化应产生 event"
     r3 = b.evaluate(params, {"in": {"raw": "weird", "ts": 3.0}}, st, 3.0, {})
     assert r3["out"]["text"] == "weird" and r3["out"]["level"] == "info", "未知原始值透传"
@@ -132,8 +133,8 @@ check("graph_feed_incremental", test_graph_feed_incremental)
 
 def _profiles():
     return {"collision": {"dashboard": {"events": {
-        "triggered": {"text": "碰撞触发", "level": "warn"},
-        "released": {"text": "碰撞释放", "level": "info"}}}}}
+        "1": {"text": "碰撞触发", "level": "warn"},
+        "0": {"text": "碰撞释放", "level": "info"}}}}}
 
 def test_service_default_and_form():
     import tempfile, os
@@ -142,22 +143,22 @@ def test_service_default_and_form():
     db = tempfile.mktemp(suffix=".db")
     svc = GraphService(GraphStore(db), _profiles(), "", None)
     # 默认值策略：无图节点 feed 后自动生成默认图，文案=collision 原始文案
-    svc.feed_state("collision", "6750f8", "triggered", 1.0)
+    svc.feed_state("collision", "6750f8", 1, 1.0)
     assert svc.display_of("6750f8")["text"] == "碰撞触发"
     # 表单投影默认值
     proj = svc.projection("collision", "6750f8")
-    assert proj["alias"] == "" and proj["map"]["triggered"]["text"] == "碰撞触发"
+    assert proj["alias"] == "" and proj["map"]["1"]["text"] == "碰撞触发"
     # 表单写：自定义文案立即生效
     svc.apply_form("collision", "6750f8", "平台窗户",
-                   {"triggered": {"text": "门窗打开", "level": "warn"},
-                    "released": {"text": "门窗关闭", "level": "info"}}, 60)
-    svc.feed_state("collision", "6750f8", "released", 2.0)
+                   {"1": {"text": "门窗打开", "level": "warn"},
+                    "0": {"text": "门窗关闭", "level": "info"}}, 60)
+    svc.feed_state("collision", "6750f8", 0, 2.0)
     d = svc.display_of("6750f8")
     assert d == {"text": "门窗关闭", "level": "info", "alias": "平台窗户"}, d
-    assert svc.translate_map_of("6750f8")["triggered"]["text"] == "门窗打开"
+    assert svc.translate_map_of("6750f8")["1"]["text"] == "门窗打开"
     # 持久化：新实例（模拟重启）图还在
     svc2 = GraphService(GraphStore(db), _profiles(), "", None)
-    svc2.feed_state("collision", "6750f8", "triggered", 3.0)
+    svc2.feed_state("collision", "6750f8", 1, 3.0)
     assert svc2.display_of("6750f8")["text"] == "门窗打开", "重启后图应保留"
     assert svc2.projection("collision", "6750f8")["alias"] == "平台窗户"
 
@@ -173,12 +174,12 @@ def test_service_alert_link():
         db = tempfile.mktemp(suffix=".db")
         svc = GraphService(GraphStore(db), _profiles(), "", None)
         svc.apply_form("collision", "6750f8", "平台窗户",
-                       {"triggered": {"text": "门窗打开", "level": "warn"},
-                        "released": {"text": "门窗关闭", "level": "info"}}, 60)
+                       {"1": {"text": "门窗打开", "level": "warn"},
+                        "0": {"text": "门窗关闭", "level": "info"}}, 60)
         T0 = 1_700_000_000.0  # 用真实时间戳：冷却判定 now-last<cooldown，小时刻会落在初始冷却内
-        svc.feed_state("collision", "6750f8", "triggered", T0)        # 首值无 event，不告警
-        svc.feed_state("collision", "6750f8", "released", T0 + 1)     # info，不告警
-        svc.feed_state("collision", "6750f8", "triggered", T0 + 2)    # 变化沿 + warn → 告警
+        svc.feed_state("collision", "6750f8", 1, T0)        # 首值无 event，不告警
+        svc.feed_state("collision", "6750f8", 0, T0 + 1)    # info，不告警
+        svc.feed_state("collision", "6750f8", 1, T0 + 2)    # 变化沿 + warn → 告警
         assert len(sent) == 1 and sent[0][0] == "门窗打开告警", sent
         assert "平台窗户" in sent[0][1]
     finally:
@@ -188,13 +189,13 @@ check("service_default_and_form", test_service_default_and_form)
 check("service_alert_link", test_service_alert_link)
 
 def test_transition_vocab_merge():
-    """过渡期兼容：contact 固件词表（open/closed）经模板 map 兜底 + 合并。"""
+    """历史词兼容：旧固件事件（open/closed 字符串）经模板历史键翻译；布尔词表为主。"""
     import tempfile, os
     from graph_store import GraphStore
     from graph_service import GraphService, default_map
     profiles = {"contact": {"template": {"map": {
-        "triggered": {"text": "门窗打开", "level": "warn"},
-        "released": {"text": "门窗关闭", "level": "info"},
+        "1": {"text": "门窗打开", "level": "warn"},
+        "0": {"text": "门窗关闭", "level": "info"},
         "open": {"text": "门窗打开", "level": "warn"},
         "closed": {"text": "门窗关闭", "level": "info"}}}}}
     # default_map 无 dashboard 时退到 template.map
@@ -202,13 +203,13 @@ def test_transition_vocab_merge():
     db = tempfile.mktemp(suffix=".db")
     gs = GraphStore(db)
     svc = GraphService(gs, profiles, "", None)
-    # 用户只保存了 triggered 自定义：open/closed 默认键合并保留
-    svc.apply_form("contact", "6750f8", "", {"triggered": {"text": "自定义", "level": "warn"}}, 60)
+    # 用户只保存了 "1" 自定义：其余默认键合并保留
+    svc.apply_form("contact", "6750f8", "", {"1": {"text": "自定义", "level": "warn"}}, 60)
     proj = svc.projection("contact", "6750f8")
-    assert proj["map"]["triggered"]["text"] == "自定义", "用户自定义优先"
+    assert proj["map"]["1"]["text"] == "自定义", "用户自定义优先"
     assert proj["map"]["open"]["text"] == "门窗打开", "projection 合并默认键"
     assert svc.translate_map_of("6750f8")["open"]["text"] == "门窗打开", "translate_map 合并默认键"
-    # 保存后的图实时翻译 open/closed 也生效
+    # 保存后的图实时翻译历史词也生效（旧固件仍在线的过渡期）
     svc.feed_state("contact", "6750f8", "open", 1_700_000_000.0)
     assert svc.display_of("6750f8")["text"] == "门窗打开", "旧固件词实时翻译"
     gs.close(); os.unlink(db)
@@ -239,14 +240,14 @@ def test_main_on_state_link():
     store = events.EventStore(db)
     gs = GraphStore(db)
     gsvc = GraphService(gs, _profiles(), "", None)
-    main._on_state("collision", "6750f8", "triggered", False, False,
+    main._on_state("collision", "6750f8", 1, False, False,
                    gsvc, store, lambda t, n: None)
-    assert main.nodes["6750f8"]["state"] == "triggered"
+    assert main.nodes["6750f8"]["state"] == 1
     assert gsvc.display_of("6750f8")["text"] == "碰撞触发", "图引擎应产出 display"
     ev = store.query(limit=1)[0]
-    assert ev["payload"]["state"] == "triggered", "事件落原始值"
+    assert ev["payload"]["state"] == 1, "事件落原始布尔值"
     # retained 重放：不记事件、不喂图
-    main._on_state("collision", "6750f8", "released", False, True,
+    main._on_state("collision", "6750f8", 0, False, True,
                    gsvc, store, lambda t, n: None)
     assert gsvc.display_of("6750f8")["text"] == "碰撞触发", "retained 不应喂图"
     store.close(); gs.close(); os.unlink(db)

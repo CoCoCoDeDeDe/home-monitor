@@ -39,7 +39,7 @@ def _ensure_node(ntype: str, node: str, discover) -> dict:
     return nodes[node]
 
 
-def _on_state(ntype: str, node: str, state: str, cached: bool, retained: bool,
+def _on_state(ntype: str, node: str, state, cached: bool, retained: bool,
               gsvc: GraphService, store: EventStore, discover) -> None:
     entry = _ensure_node(ntype, node, discover)
     entry["state"] = state

@@ -52,7 +52,7 @@ def start_mqtt(host: str, port: int, user: str, password: str,
             return
         print(f"[mqtt] {msg.topic} {data}", flush=True)
         on_state(ntype, node,
-                 data.get("state", ""),
+                 data.get("state"),  # 布尔固件词表：1/0 原样传递（旧固件为字符串词）
                  bool(data.get("cached")),
                  bool(msg.retain))
 

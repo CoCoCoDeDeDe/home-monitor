@@ -94,8 +94,8 @@ function eventText(e, nodeOf) {
 let cfgNode = null;
 let cfgMap = {};
 let cfgRaws = [];
-const RAW_STATES = ['triggered', 'released'];  // collision 固件词表；其余键（如旧词 open/closed）动态补充
-const RAW_LABELS = { triggered: '触发', released: '释放', open: '旧词·开', closed: '旧词·关' };
+const RAW_STATES = ['1', '0'];  // 布尔固件词表（1=触发/0=释放）；历史词键动态补充
+const RAW_LABELS = { '1': '触发', '0': '释放', triggered: '历史词', released: '历史词', open: '历史词', closed: '历史词' };
 
 async function openCfg(id) {
   cfgNode = id;

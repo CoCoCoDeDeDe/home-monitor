@@ -43,7 +43,8 @@ class IoOutBlock:
 
 
 class TranslateBlock:
-    """语义翻译块：原始值 → 用户配置文案+级别。out=当前显示值，event=raw 变化沿。"""
+    """语义翻译块：原始值 → 用户配置文案+级别。out=当前显示值，event=raw 变化沿。
+    map 键为 str(raw)（布尔固件词表即 "1"/"0"）；raw 原样透传进 out。"""
 
     kind = "translate"
     inputs = ("in",)
@@ -54,11 +55,12 @@ class TranslateBlock:
         v = ins.get("in")
         if v is None:
             return None
-        raw = v.get("raw", "")
-        m = (params.get("map") or {}).get(raw)
+        raw = v.get("raw")
+        key = str(raw)
+        m = (params.get("map") or {}).get(key)
         if m is None:  # 未知原始值透传：永远能显示、不告警
-            m = {"text": raw, "level": "info"}
-        out = {"raw": raw, "text": m.get("text", raw),
+            m = {"text": key, "level": "info"}
+        out = {"raw": raw, "text": m.get("text") or key,
                "level": m.get("level", "info"), "ts": v.get("ts", now)}
         prev = state.get("raw")
         state["raw"] = raw

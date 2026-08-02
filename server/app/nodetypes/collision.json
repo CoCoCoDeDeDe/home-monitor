@@ -1,14 +1,14 @@
 {
   "type": "collision",
   "label": "碰撞传感器",
-  "version": 1,
-  "comment": "硬件本质类型档案：固件只上报原始二值（triggered/released），不猜部署语义。部署语义（门窗/在位…）由节点注册表绑定语义档案翻译（Issue #27）。",
+  "version": 2,
+  "comment": "硬件本质类型档案：固件只上报原始布尔（1=触发/0=释放），不猜部署语义。语义（门窗/在位…）是图引擎翻译块的用户配置（Issue #27）。",
   "ha": {
     "component": "binary_sensor",
     "state_topic": "state",
     "value_template": "{{ value_json.state }}",
-    "payload_on": "triggered",
-    "payload_off": "released",
+    "payload_on": "1",
+    "payload_off": "0",
     "extra_sensors": [
       { "suffix": "rssi", "name": "信号", "device_class": "signal_strength",
         "unit": "dBm", "state_topic": "health", "value_template": "{{ value_json.rssi }}" },
@@ -20,8 +20,8 @@
     "primary": {
       "kind": "state", "field": "state",
       "map": {
-        "triggered": { "text": "已触发", "level": "warn" },
-        "released": { "text": "已释放", "level": "ok" }
+        "1": { "text": "已触发", "level": "warn" },
+        "0": { "text": "已释放", "level": "ok" }
       }
     },
     "fields": {
@@ -29,8 +29,8 @@
       "uptime": { "label": "在线", "format": "duration" }
     },
     "events": {
-      "triggered": { "text": "碰撞触发", "level": "warn" },
-      "released":  { "text": "碰撞释放", "level": "info" }
+      "1": { "text": "碰撞触发", "level": "warn" },
+      "0": { "text": "碰撞释放", "level": "info" }
     }
   }
 }
