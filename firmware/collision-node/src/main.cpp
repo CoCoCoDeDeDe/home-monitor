@@ -1,36 +1,37 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>      // MQTT host 主机名解析：手写最小 mDNS A 查询（LEAmDNS 无主机查询 API）
-#include <WiFiManager.h>   // 配网门户：首次/配网失败时开热点 contact-node-setup
+#include <WiFiManager.h>   // 配网门户：首次/配网失败时开热点 collision-node-setup
 #include <PubSubClient.h>
 #include <LittleFS.h>
 
-// contact-node：ESP8266/ESP-01 + 干簧管 门窗传感器节点
-// 开门（干簧管断开）→ 发布 contact/<chipid>/state {"state":"open"} → app 消费告警
+// collision-node：ESP8266/ESP-01 + 碰撞/接触传感器节点（布尔二值上报器）
+// 线上协议为原始布尔 {"state":1|0}（1=触发/0=释放）→ collision/<chipid>/state
+// 语义（门窗/在位…）由服务端图引擎配置（Issue #27），固件不猜部署语义
 // 设计依据：docs/design.md
 //
 // 可靠性设计（Issue #6）：
-// - LWT：异常掉线 broker 自动广播 contact/<id>/status = offline（retain）
+// - LWT：异常掉线 broker 自动广播 collision/<id>/status = offline（retain）
 // - MQTT 断开期间的状态变化缓存到 LittleFS；重连后不立即补发——app 可能尚未
-//   订阅，先发 contact/syncreq，等 app 广播 contact/sync 后再补发（标记 cached）
+//   订阅，先发 collision/syncreq，等 app 广播 collision/sync 后再补发（标记 cached）
 // 注：PubSubClient 发布仅支持 QoS 0，QoS 1 由 LWT(willQoS=1) 和缓存补发兜住。
 //
-// 健康上报（Issue #10）：每 60s 发布 contact/<id>/health {"rssi","uptime"}（非 retain），
+// 健康上报（Issue #10）：每 60s 发布 collision/<id>/health {"rssi","uptime"}（非 retain），
 // 供摆位评估与存活监控；断线则停更，配合 LWT 区分弱信号与离线。
 //
 // 其他：WiFiManager 自定义参数（MQTT 配置）不落盘，需自己存 LittleFS；
 // 开机后 1.5s 内按住 FLASH 键 ≥300ms 清空全部配置并重开配网门户。
 
-static const uint8_t PIN_REED = 5;   // NodeMCU D1 / GPIO5，干簧管接此脚与 GND 之间
+static const uint8_t PIN_REED = 5;   // NodeMCU D1 / GPIO5，传感器触点接此脚与 GND 之间
 static const uint8_t PIN_FLASH = 0;  // NodeMCU FLASH 键 / GPIO0，按住为 LOW
 static const unsigned long DEBOUNCE_MS = 50;
 static const unsigned long MQTT_RETRY_MS = 5000;
 static const char* MQTT_CFG_PATH = "/mqtt.cfg";
 static const char* EVENTS_PATH = "/events.log";
 static const size_t EVENTS_MAX_BYTES = 400;  // 缓存上限，约 10 条事件
-// 补发握手：板子发 contact/syncreq，app 广播 contact/sync，板子收到才补发
-static const char* TOPIC_SYNC = "contact/sync";
-static const char* TOPIC_SYNCREQ = "contact/syncreq";
+// 补发握手：板子发 collision/syncreq，app 广播 collision/sync，板子收到才补发
+static const char* TOPIC_SYNC = "collision/sync";
+static const char* TOPIC_SYNCREQ = "collision/syncreq";
 static const unsigned long SYNCREQ_RETRY_MS = 30000;  // 没等到 sync 则重发请求
 static const unsigned long HEALTH_INTERVAL_MS = 60000;  // 健康上报周期
 
@@ -47,12 +48,12 @@ char mqttPass[24] = "";
 char mqttTarget[40];    // 实际连接目标：mDNS 解析出的 IP 或原样 host
 int resolveFailCount = 0;  // 主机名模式连续连接失败计数，触发重新解析
 
-char nodeId[24];      // contact-<chipid>，每块板唯一
-char topicState[40];  // contact/<chipid>/state
-char topicStatus[40]; // contact/<chipid>/status
-char topicHealth[40]; // contact/<chipid>/health
+char nodeId[24];      // collision-<chipid>，每块板唯一
+char topicState[40];  // collision/<chipid>/state
+char topicStatus[40]; // collision/<chipid>/status
+char topicHealth[40]; // collision/<chipid>/health
 
-int lastStableState = -1;   // 去抖后的稳定状态：HIGH=关（闭合）/ LOW=开（断开）
+int lastStableState = -1;   // 去抖后的稳定电平：HIGH=释放（0）/ LOW=触发（1）
 int lastRawReading = -1;
 unsigned long lastRawChangeMs = 0;
 unsigned long lastMqttRetryMs = 0;
@@ -82,16 +83,16 @@ void saveMqttConfig() {
   Serial.println("mqtt cfg saved");
 }
 
-void publishState(const char* state, bool cached = false) {
+void publishState(int state, bool cached = false) {
   char payload[100];
-  snprintf(payload, sizeof(payload), "{\"node\":\"%s\",\"state\":\"%s\"%s}",
+  snprintf(payload, sizeof(payload), "{\"node\":\"%s\",\"state\":%d%s}",
            nodeId, state, cached ? ",\"cached\":true" : "");
   mqtt.publish(topicState, payload, true);  // retain：app 重启也能拿到最新状态
   Serial.printf("pub %s %s\n", topicState, payload);
 }
 
-// 断线期间的事件写入 LittleFS 缓存
-void cacheEvent(const char* state) {
+// 断线期间的事件写入 LittleFS 缓存（存 "1"/"0"）
+void cacheEvent(int state) {
   File f = LittleFS.open(EVENTS_PATH, "r");
   size_t sz = f ? f.size() : 0;
   if (f) f.close();
@@ -103,7 +104,7 @@ void cacheEvent(const char* state) {
   if (f) {
     f.println(state);
     f.close();
-    Serial.printf("cached event: %s\n", state);
+    Serial.printf("cached event: %d\n", state);
   }
 }
 
@@ -114,8 +115,8 @@ void flushEvents() {
   while (f.available()) {
     String s = f.readStringUntil('\n');
     s.trim();
-    if (s == "open" || s == "closed") {
-      publishState(s.c_str(), true);
+    if (s == "1" || s == "0") {
+      publishState(s.toInt(), true);
     }
   }
   f.close();
@@ -287,8 +288,8 @@ bool mqttConnect() {
     Serial.println("mqtt connected");
     mqtt.publish(topicStatus, "online", true);  // 上线标记
     // 上线即上报当前状态，保证 broker 里 retain 的是最新值
-    publishState(digitalRead(PIN_REED) == HIGH ? "closed" : "open");
-    // 有缓存事件：订阅 app 就绪广播并请求同步，收到 contact/sync 才补发
+    publishState(digitalRead(PIN_REED) == HIGH ? 0 : 1);
+    // 有缓存事件：订阅 app 就绪广播并请求同步，收到 collision/sync 才补发
     mqtt.subscribe(TOPIC_SYNC);
     if (eventsPending()) requestSync();
     return true;
@@ -308,10 +309,10 @@ void setup() {
   Serial.begin(115200);
   pinMode(PIN_REED, INPUT_PULLUP);
   pinMode(PIN_FLASH, INPUT_PULLUP);
-  snprintf(nodeId, sizeof(nodeId), "contact-%06x", ESP.getChipId());
-  snprintf(topicState, sizeof(topicState), "contact/%s/state", nodeId + 8);
-  snprintf(topicStatus, sizeof(topicStatus), "contact/%s/status", nodeId + 8);
-  snprintf(topicHealth, sizeof(topicHealth), "contact/%s/health", nodeId + 8);
+  snprintf(nodeId, sizeof(nodeId), "collision-%06x", ESP.getChipId());
+  snprintf(topicState, sizeof(topicState), "collision/%s/state", nodeId + 10);
+  snprintf(topicStatus, sizeof(topicStatus), "collision/%s/status", nodeId + 10);
+  snprintf(topicHealth, sizeof(topicHealth), "collision/%s/health", nodeId + 10);
   Serial.printf("%s boot\n", nodeId);
 
   LittleFS.begin();
@@ -355,8 +356,8 @@ void setup() {
     LittleFS.remove(MQTT_CFG_PATH);
   }
 
-  // 已存凭据则直连；否则开热点 contact-node-setup（连上后 192.168.4.1 配网）
-  if (!wm.autoConnect("contact-node-setup")) {
+  // 已存凭据则直连；否则开热点 collision-node-setup（连上后 192.168.4.1 配网）
+  if (!wm.autoConnect("collision-node-setup")) {
     Serial.println("config portal timeout, rebooting");
     ESP.restart();
   }
@@ -401,7 +402,7 @@ void loop() {
   }
   if (lastRawReading != lastStableState && millis() - lastRawChangeMs > DEBOUNCE_MS) {
     lastStableState = lastRawReading;
-    const char* state = lastStableState == HIGH ? "closed" : "open";
+    int state = lastStableState == HIGH ? 0 : 1;
     if (mqtt.connected()) {
       publishState(state);
     } else {

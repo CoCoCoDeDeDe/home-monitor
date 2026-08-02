@@ -10,7 +10,7 @@ camera-node ×N                                  ┌─ Mosquitto (MQTT over TLS
   ESP32-S3 + OV2640                             ├─ ingest     接收帧流/鉴权
   MJPEG 按需推流 ──────────┐                    ├─ detector   帧差移动侦测 → YOLOv8n 人形确认
                            │                    ├─ recorder   事件快照/短视频存储
-contact-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱
+collision-node ×N               ├──局域网 WiFi─────▶ ├─ alerter    防抖聚合 → Server酱
   ESP8266/ESP-01 + 干簧管   │  MQTT/HTTPS        ├─ web        监控看板（物模型渲染）+ 历史事件 + 布防撤防
   开门即唤醒上报 ──────────┘                    └─ Tailscale  外网组网出口
                                                 【客户端】手机/电脑装 Tailscale → http://<tailscale-ip>:8000
@@ -28,7 +28,7 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 
 | 链路 | 协议/端口 | 说明 |
 |---|---|---|
-| contact-node → 笔记本 | MQTT `1883`（账号密码；TLS 8883 后续 ticket 补上） | 开门事件、心跳 |
+| collision-node → 笔记本 | MQTT `1883`（账号密码；TLS 8883 后续 ticket 补上） | 开门事件、心跳 |
 | camera-node → 笔记本 | MQTT `8883` + HTTPS POST | 心跳/控制 + 事件帧、SD 分段上传 |
 | 浏览器 → 笔记本（家中） | 局域网 HTTPS | 实时监看、历史回看 |
 | 浏览器 → 笔记本（外网） | Tailscale 虚拟网 | 查看设备装客户端入 tailnet，WireGuard 加密，无入站端口 |
@@ -118,7 +118,7 @@ contact-node ×N               ├──局域网 WiFi─────▶ ├─ 
 home-monitor/
 ├── firmware/
 │   ├── camera-node/    # PlatformIO, ESP32-S3 + OV2640
-│   └── contact-node/      # PlatformIO, ESP8266/ESP-01 + 干簧管
+│   └── collision-node/      # PlatformIO, ESP8266/ESP-01 + 干簧管
 ├── server/
 │   ├── docker-compose.yml   # mosquitto + app + cloudflared
 │   └── app/            # FastAPI：MQTT 消费/流转发/检测/告警/Web
@@ -128,14 +128,14 @@ home-monitor/
 
 ## 分期实施
 
-1. **Phase 1（最小可用）**：docker 环境 + MQTT + contact-node 上报 + Server酱告警 ✅ → LWT/缓存可靠性 ✅ → 健康上报 ✅ → mDNS 主机名 ✅ → Web 监控看板（物模型）
+1. **Phase 1（最小可用）**：docker 环境 + MQTT + collision-node 上报 + Server酱告警 ✅ → LWT/缓存可靠性 ✅ → 健康上报 ✅ → mDNS 主机名 ✅ → Web 监控看板（物模型）
 2. **Phase 2（摄像头）**：camera-node 推流（含 SD 卡录像）+ 看板实时监看；后续移动侦测 + 人形确认 + 事件快照
 3. **Phase 3（外网访问）**：Tailscale 组网 ✅；布防撤防、告警策略、多设备管理
 
 ## 风险与对策
 
 - 笔记本可用性（关机/睡眠/游戏） → 合盖不睡眠常开；识别限核、游戏时降级；SD 卡边缘录像保底
-- 笔记本离线时门窗事件丢失 → contact-node 固件本地缓存事件，重连后经 syncreq/sync 握手补发
+- 笔记本离线时门窗事件丢失 → collision-node 固件本地缓存事件，重连后经 syncreq/sync 握手补发
 - Tailscale 不可用或需免客户端分享 → 切换 Cloudflare Tunnel 备选方案（容器加一个 cloudflared 即可）
 - SD 卡磨损/掉电损坏 → 分段追加写 + 开机校验，SD 卡作耗材轮换
 - ESP-01 深度睡眠唤醒硬件限制 → 改用干簧管供电方案
