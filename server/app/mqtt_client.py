@@ -1,4 +1,4 @@
-"""MQTT 消费：订阅 <type>/<id>/{state,status,health}（物模型通用）与 contact/syncreq，事件回调。"""
+"""MQTT 消费：订阅 <type>/<id>/{state,status,health}（物模型通用）与 +/syncreq，事件回调。"""
 
 import json
 
@@ -19,19 +19,22 @@ def start_mqtt(host: str, port: int, user: str, password: str,
 
     def on_connect(c, _u, _f, rc, _p=None):
         print(f"[mqtt] connected rc={rc}", flush=True)
-        # 物模型通用化：type 段用通配符，任何新节点类型自动被消费
+        # 物模型通用化：type 段用通配符，任何新节点类型自动被消费；
+        # 补发握手同理（<type>/syncreq → 回 <type>/sync）
         c.subscribe([("+/+/state", 0), ("+/+/status", 0),
-                     ("+/+/health", 0), ("contact/syncreq", 0)])
-        # 广播就绪：有缓存事件的节点收到后才补发（避免本端未订阅时补发被丢）
-        c.publish("contact/sync", "1")
+                     ("+/+/health", 0), ("+/syncreq", 0)])
+        # 广播就绪：有缓存事件的节点收到后才补发（避免本端未订阅时补发被丢）。
+        # 已知类型各发一份（节点类型少；新增固件类型时在此补充）
+        for ntype in ("contact", "collision"):
+            c.publish(f"{ntype}/sync", "1")
 
     def on_message(c, _u, msg):
-        if msg.topic == "contact/syncreq":  # 节点请求补发握手
+        parts = msg.topic.split("/")
+        if len(parts) == 2 and parts[1] == "syncreq":  # 节点请求补发握手
             print(f"[mqtt] syncreq from {msg.payload.decode(errors='replace')}", flush=True)
-            c.publish("contact/sync", "1")
+            c.publish(f"{parts[0]}/sync", "1")
             return
-        parts = msg.topic.split("/")  # <type>/<node>/<kind>
-        if len(parts) != 3:
+        if len(parts) != 3:  # <type>/<node>/<kind>
             return
         ntype, node, kind = parts
         if kind == "status":
