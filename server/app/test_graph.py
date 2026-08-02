@@ -187,5 +187,43 @@ def test_service_alert_link():
 check("service_default_and_form", test_service_default_and_form)
 check("service_alert_link", test_service_alert_link)
 
+def test_main_on_state_link():
+    import tempfile, os
+    for name in ["fastapi", "pydantic", "paho", "paho.mqtt", "paho.mqtt.client"]:
+        sys.modules[name] = types.ModuleType(name)
+    class _F:
+        def __init__(self, *a, **k): pass
+        def get(self, *a, **k): return lambda f: f
+        def put(self, *a, **k): return lambda f: f
+    sys.modules["fastapi"].FastAPI = _F
+    sys.modules["fastapi"].HTTPException = Exception
+    fr = types.ModuleType("fastapi.responses")
+    fr.FileResponse = lambda *a, **k: None
+    sys.modules["fastapi.responses"] = fr
+    sys.modules["pydantic"].BaseModel = object
+    sys.modules["paho.mqtt.client"].Client = _F
+    sys.modules["paho.mqtt.client"].CallbackAPIVersion = types.SimpleNamespace(VERSION2=2)
+    import events
+    from graph_store import GraphStore
+    from graph_service import GraphService
+    import main
+    db = tempfile.mktemp(suffix=".db")
+    store = events.EventStore(db)
+    gs = GraphStore(db)
+    gsvc = GraphService(gs, _profiles(), "", None)
+    main._on_state("collision", "6750f8", "triggered", False, False,
+                   gsvc, store, lambda t, n: None)
+    assert main.nodes["6750f8"]["state"] == "triggered"
+    assert gsvc.display_of("6750f8")["text"] == "碰撞触发", "图引擎应产出 display"
+    ev = store.query(limit=1)[0]
+    assert ev["payload"]["state"] == "triggered", "事件落原始值"
+    # retained 重放：不记事件、不喂图
+    main._on_state("collision", "6750f8", "released", False, True,
+                   gsvc, store, lambda t, n: None)
+    assert gsvc.display_of("6750f8")["text"] == "碰撞触发", "retained 不应喂图"
+    store.close(); gs.close(); os.unlink(db)
+
+check("main_on_state_link", test_main_on_state_link)
+
 if __name__ == "__main__":
     sys.exit(1 if FAILED else 0)
