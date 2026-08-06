@@ -127,7 +127,7 @@ def list_nodes() -> dict:
     """节点状态表 + 图输出：display=显示点输出（{text,level,alias}），
     map=翻译表（看板事件列表把历史原始事件翻译成当前语义文案）。"""
     return {nid: {**entry,
-                  "display": app.state.gsvc.display_of(nid),
+                  "display": app.state.gsvc.display_of(nid, entry.get("state")),
                   "map": app.state.gsvc.translate_map_of(nid)}
             for nid, entry in nodes.items()}
 

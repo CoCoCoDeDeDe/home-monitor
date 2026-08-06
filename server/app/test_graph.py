@@ -216,6 +216,35 @@ def test_transition_vocab_merge():
 
 check("transition_vocab_merge", test_transition_vocab_merge)
 
+def test_display_fallback_no_cache():
+    """保存配置/重启后 display 缓存空洞：下一次状态到来前，用已知 state 按当前 map 现算，
+    看板卡片不应回退显示原始值。"""
+    import tempfile, os
+    from graph_store import GraphStore
+    from graph_service import GraphService
+    db = tempfile.mktemp(suffix=".db")
+    svc = GraphService(GraphStore(db), _profiles(), "", None)
+    svc.feed_state("collision", "6750f8", 0, 1.0)
+    assert svc.display_of("6750f8")["text"] == "碰撞释放"
+    svc.apply_form("collision", "6750f8", "平台窗户",
+                   {"1": {"text": "门窗打开", "level": "warn"},
+                    "0": {"text": "门窗关闭", "level": "info"}}, 60)
+    assert svc.display_of("6750f8") == {}, "保存后图重建，缓存 view 应为空（复现前提）"
+    d = svc.display_of("6750f8", 0)
+    assert d == {"text": "门窗关闭", "level": "info", "alias": "平台窗户"}, d
+    assert svc.display_of("6750f8", "xyz")["text"] == "xyz", "未知 state 键透传原文"
+    assert svc.display_of("6750f8") == {}, "不给 state 时维持旧行为（无缓存即空）"
+    # 重启场景：图从库里加载、尚未 feed，retained 重放只给了 state
+    svc2 = GraphService(GraphStore(db), _profiles(), "", None)
+    d2 = svc2.display_of("6750f8", 1)
+    assert d2 == {"text": "门窗打开", "level": "warn", "alias": "平台窗户"}, d2
+    # 缓存存在时优先用缓存（已 feed 的节点不受影响）
+    svc2.feed_state("collision", "6750f8", 0, 2.0)
+    assert svc2.display_of("6750f8", 1)["text"] == "门窗关闭"
+    svc._store.close(); svc2._store.close(); os.unlink(db)
+
+check("display_fallback_no_cache", test_display_fallback_no_cache)
+
 def test_main_on_state_link():
     import tempfile, os
     for name in ["fastapi", "pydantic", "paho", "paho.mqtt", "paho.mqtt.client"]:

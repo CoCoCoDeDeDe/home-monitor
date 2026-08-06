@@ -69,9 +69,23 @@ class GraphService:
         g = self._ensure(ntype, node)
         g.feed("in1", {"state": {"raw": raw, "ts": now}}, now, self._ctx(node))
 
-    def display_of(self, node: str) -> dict:
+    def display_of(self, node: str, state=None) -> dict:
+        """显示点输出。缓存优先；缓存空洞（保存配置/重启后、下次状态到来前）
+        且调用方给了当前 state 时，按生效翻译表现算兜底，避免看板回退显示原始值。"""
         g = self._graphs.get(node)
-        return (g.output("disp1", "view") or {}) if g else {}
+        if g:
+            view = g.output("disp1", "view")
+            if view:
+                return view
+        if state is None:
+            return {}
+        alias = ((g.block_params("disp1") or {}).get("alias", "")) if g else ""
+        key = str(state)
+        m = self.translate_map_of(node).get(key)
+        if m is None:  # 与翻译块一致：未知原始值透传
+            m = {"text": key, "level": "info"}
+        return {"text": m.get("text") or key,
+                "level": m.get("level", "info"), "alias": alias}
 
     def translate_map_of(self, node: str) -> dict:
         """节点生效翻译表：默认表为底 + 图内 map 覆盖（看板事件列表翻译历史原始值用）。"""
